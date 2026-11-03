@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import Foundation
 import GuardCore
 
@@ -38,6 +39,19 @@ extension AppModel {
         edit(id, unchangedHint: hint) { profile in
             guard let index = profile.files.firstIndex(of: grant) else { return }
             profile.files[index].access = access
+        }
+    }
+
+    /// 按路径添加受管程序。校验不通过时返回要在弹窗里显示的原因，弹窗不关、输入不丢。
+    func addProgram(path: String, to id: String) -> String? {
+        switch validateProgram(path) {
+        case let .failure(error):
+            return ProgramPath.message(for: error)
+        case let .success(real):
+            edit(id) { profile in
+                if !profile.programs.contains(real) { profile.programs.append(real) }
+            }
+            return nil
         }
     }
 

@@ -45,6 +45,8 @@ struct MainWindow: View {
         .onDisappear { MainWindowBehavior.windowClosed() }
         .onChange(of: selection) { _, value in storedSelection = value ?? "" }
         .onChange(of: model.report?.profiles.map(\.profileID) ?? []) { _, ids in
+            // 列表暂时为空（查询失败/正在刷新）时保持当前选择，别把详情页拆掉重建。
+            guard !ids.isEmpty else { return }
             if selection == nil || !(ids.contains(selection ?? "")) { selection = ids.first }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refresh() }
@@ -98,7 +100,7 @@ struct MainWindow: View {
         VStack(spacing: 0) {
             notices
             Group {
-                if !model.helperReachable {
+                if !model.helperReachable && model.report == nil {
                     OnboardingView()
                 } else if let selection, model.profile(selection) != nil {
                     ProfileDetailView(profileID: selection).id(selection)
@@ -126,6 +128,9 @@ struct MainWindow: View {
         var items: [Notice] = []
         if let error = model.lastError {
             items.append(Notice(kind: .error, text: error, actionTitle: "关闭") { model.lastError = nil })
+        }
+        if !model.helperReachable && model.report != nil {
+            items.append(Notice(kind: .warning, text: "暂时连不上 Helper，下面是上次的状态，修改不会生效。正在重试…"))
         }
         if model.helperReachable {
             if model.needsFullDiskAccess {

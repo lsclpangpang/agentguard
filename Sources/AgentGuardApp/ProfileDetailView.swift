@@ -271,11 +271,12 @@ private struct ManagedProgramsCard: View {
     @EnvironmentObject var model: AppModel
     let profile: Profile
     let unmanaged: [Int32]
+    @State private var adding = false
 
     var body: some View {
         Card(title: "受管程序", systemImage: "app.badge.checkmark",
              subtitle: "这个配置档管控的可执行文件，会自动获得读取和执行权限。不经过 AgentGuard 直接运行的副本不受沙箱限制，会在这里报告。") {
-            Button { model.addProgram(to: profile.id) } label: { Label("添加", systemImage: "plus") }
+            Button { adding = true } label: { Label("添加", systemImage: "plus") }
                 .buttonStyle(.borderless)
         } content: {
             VStack(alignment: .leading, spacing: 10) {
@@ -300,6 +301,59 @@ private struct ManagedProgramsCard: View {
                 }
             }
         }
+        .sheet(isPresented: $adding) {
+            // 输入框不能放在 ScrollView 里：一提交，AppKit 把焦点落在它身上，SwiftUI 就为
+            // 了让输入框可见而滚动，详情页看起来“飘”一下。放进 sheet 就没有这个副作用。
+            AddProgramSheet(profileID: profile.id) { adding = false }
+                .environmentObject(model)
+        }
+    }
+}
+
+private struct AddProgramSheet: View {
+    @EnvironmentObject var model: AppModel
+    let profileID: String
+    let dismiss: () -> Void
+    @State private var path = ""
+    @State private var error: String?
+
+    private var trimmed: String { path.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private func submit() {
+        guard !trimmed.isEmpty else { return }
+        error = model.addProgram(path: trimmed, to: profileID)
+        if error == nil { dismiss() }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("添加受管程序").font(.headline)
+            Text("填真正在跑的可执行文件，不是启动它的脚本。例如 /opt/homebrew/bin/claude、/Library/KnodoRestricted/release/knodo-agentd。")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("/path/to/executable", text: $path)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(submit)
+                .onChange(of: path) { error = nil }
+            if let error {
+                Label(error, systemImage: "exclamationmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("选择文件…") {
+                    if let picked = model.pickFile() { path = picked }
+                }
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("添加", action: submit)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmed.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
     }
 }
 
