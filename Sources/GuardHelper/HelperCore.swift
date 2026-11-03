@@ -147,7 +147,25 @@ final class HelperCore {
         var startTime: UInt64
         /// 由启动器注册的实例受 launchd 看护；恢复时要把这个事实一起带回来，
         /// 否则重启 Helper 之后 detached 判定会静默消失。
-        var supervisedByLaunchd: Bool = false
+        var supervisedByLaunchd: Bool
+
+        /// 合成的 Decodable 不认属性默认值，老记录缺这个 key 会直接解码失败、恢复整个失效。
+        init(instance: Int, revision: Int, pid: Int32, startTime: UInt64, supervisedByLaunchd: Bool) {
+            self.instance = instance
+            self.revision = revision
+            self.pid = pid
+            self.startTime = startTime
+            self.supervisedByLaunchd = supervisedByLaunchd
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            instance = try c.decode(Int.self, forKey: .instance)
+            revision = try c.decode(Int.self, forKey: .revision)
+            pid = try c.decode(Int32.self, forKey: .pid)
+            startTime = try c.decode(UInt64.self, forKey: .startTime)
+            supervisedByLaunchd = try c.decodeIfPresent(Bool.self, forKey: .supervisedByLaunchd) ?? false
+        }
     }
 
     private func instanceRecordPath(_ profileID: String) -> String? {
