@@ -21,6 +21,7 @@ struct ProfileDetailView: View {
                 .frame(maxWidth: 860, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
+            .overlay(alignment: .top) { ScrollTopScrim() }
             .navigationTitle(profileID)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {

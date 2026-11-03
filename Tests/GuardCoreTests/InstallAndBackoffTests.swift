@@ -51,3 +51,24 @@ import Testing
         #expect(b.nextDelay() == 30)
     }
 }
+
+@Suite struct HelperInstallRepairTests {
+    @Test func answersNeedsNoRepair() {
+        #expect(HelperInstallRepair.action(status: .enabled, reachable: true) == .none)
+        #expect(HelperInstallRepair.action(status: .requiresApproval, reachable: true) == .none)
+    }
+
+    @Test func silentRegisteredServiceIsReRegistered() {
+        // A re-signed build leaves the BTM record holding the previous cdhashes.
+        #expect(HelperInstallRepair.action(status: .enabled, reachable: false) == .reregister)
+    }
+
+    @Test func neverRegisteredServiceIsRegistered() {
+        #expect(HelperInstallRepair.action(status: .notRegistered, reachable: false) == .register)
+    }
+
+    @Test func pendingApprovalOrMissingPlistIsNotTouched() {
+        #expect(HelperInstallRepair.action(status: .requiresApproval, reachable: false) == .none)
+        #expect(HelperInstallRepair.action(status: .notFound, reachable: false) == .none)
+    }
+}

@@ -2,6 +2,7 @@
 import Foundation
 import GuardCore
 import GuardPlatform
+import os
 
 /// Owns the HelperService and performs the privileged side effects its decisions call for.
 /// Everything runs on `queue`.
@@ -13,9 +14,11 @@ final class HelperCore {
     private var config: AgentGuardConfig?
     private var service: HelperService?
     private let collector = Collector()
+    private let bundleMacOSDirectory: String
     private var started = false
 
     init(bundleMacOSDirectory: String) {
+        self.bundleMacOSDirectory = bundleMacOSDirectory
         var identities: [CallerRole: CodeIdentity] = [:]
         for (role, name) in [(CallerRole.app, "AgentGuard"), (.cli, "guard"), (.launcher, "agentguard-launcher")] {
             if let hash = try? CodeSigning.cdhash(atPath: bundleMacOSDirectory + "/" + name) {
@@ -36,6 +39,11 @@ final class HelperCore {
 
     func start() {
         started = true
+        // The collector daemon owns Full Disk Access; it is installed outside the app bundle so an
+        // app rebuild (and the re-signing that follows) never invalidates that grant.
+        if case let .failed(reason) = CollectorInstaller.ensureInstalled(bundleMacOSDirectory: bundleMacOSDirectory) {
+            FileHandle.standardError.write(Data("采集器安装失败：\(reason)\n".utf8))
+        }
         collector.onLine = { [weak self] line in self?.queue.async { self?.service?.observe(line: line) } }
         collector.onDenial = { [weak self] denial in self?.queue.async { self?.service?.observe(denial: denial) } }
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
@@ -161,7 +169,10 @@ final class HelperCore {
 
     /// File events are only collected while some profile is learning; lifecycle events always.
     private func refreshCollector() {
-        guard let config else { return }
+        guard let config else {
+            os_log("refreshCollector: 还没有 owner/config，跳过", log: .default, type: .error)
+            return
+        }
         let learning = ((try? config.store.profileIDs()) ?? []).contains { id in
             (try? config.store.latest(id))?.mode != .enforce
         }

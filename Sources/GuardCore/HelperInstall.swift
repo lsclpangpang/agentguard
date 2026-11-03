@@ -47,6 +47,29 @@ public struct HelperInstallOutcome: Equatable, Sendable {
     }
 }
 
+/// What has to happen before the Helper can answer, given the service status and whether it answers.
+///
+/// A registered daemon keeps the launch constraint recorded when it was registered, and an ad-hoc
+/// re-signed build changes every cdhash: launchd then reports `Unable to get updated LWCR … error
+/// 0x16` and exits with `OS_REASON_CODESIGNING`, so the only way forward is a fresh registration.
+public enum HelperInstallRepair: Equatable, Sendable {
+    case none
+    case register
+    case reregister
+
+    public static func action(status: HelperInstallStatus, reachable: Bool) -> HelperInstallRepair {
+        guard !reachable else { return .none }
+        switch status {
+        case .enabled: return .reregister
+        case .notRegistered: return .register
+        case .requiresApproval, .notFound: return .none
+        }
+    }
+
+    /// A refused registration that is already visible in Login Items needs the switch turned on.
+    public static let appReregistrationGuide = "请在“系统设置 > 通用 > 登录项 > 允许在后台”中打开 AgentGuard 的后台项目，然后回到本窗口刷新"
+}
+
 /// Delay before restarting a collector that exited without making progress, so a missing
 /// authorization does not turn into a restart loop.
 public struct RestartBackoff: Sendable {

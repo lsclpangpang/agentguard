@@ -28,6 +28,8 @@
 
 - [ ] `eslogger --format json` 的字段名与 `ESLoggerParserTests` 中的样例一致（`global_seq_num`、`process.audit_token.pid/pidversion`、`event.fork.child`、`event.exec.target`、`open.fflag` 等）；用真实输出替换测试样例。
 - [x] 由 Helper 启动 eslogger 时，“完全磁盘访问”要授予谁。（2026-11-03 真机确认：TCC 日志 `AUTHREQ_ATTRIBUTION: responsible={com.lsclpangpang.agentguard.helper} requesting={com.apple.eslogger}`，授权对象是 `agentguard-helper`，只给 `/usr/bin/eslogger` 授权无效。）
+- [x] 授权对象搬出 App 包：采集器改成 `/Library/PrivilegedHelperTools/com.lsclpangpang.agentguard.collector` 独立守护进程，eslogger 是它的子进程，TCC 归因 `responsible_path=/Library/PrivilegedHelperTools/com.lsclpangpang.agentguard.collector`；App 重签不再让授权失效（2026-11-03 真机确认）。
+- [ ] 采集器升级策略：替换 `/Library/PrivilegedHelperTools` 下的副本会让授权失效，需重新授权一次（当前实现只在该文件缺失时安装）。
 - [ ] 全系统 fork/exec/exit 事件的 CPU 与内存开销；开启文件事件（学习模式）时的开销。
 - [ ] 沙箱拒绝日志的实际格式与 `SandboxLogParserTests` 一致，`log stream` 谓词能收到。
 
