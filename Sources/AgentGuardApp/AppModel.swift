@@ -15,6 +15,9 @@ final class AppModel: ObservableObject {
     /// Install progress shown in the Helper banner; cleared as soon as the Helper answers.
     @Published var installNotice: String?
     private var pollTask: Task<Void, Never>?
+    /// One registration repair per launch; see `repairStaleRegistrationIfNeeded`.
+    private var didAttemptRegistrationRepair = false
+    private var registrationRepairTask: Task<Void, Never>?
 
     let config: AgentGuardConfig
 
@@ -53,6 +56,7 @@ final class AppModel: ObservableObject {
                 } else {
                     self.report = nil
                     self.helperReachable = false
+                    self.repairStaleRegistrationIfNeeded()
                 }
                 self.revision += 1
             }
@@ -68,18 +72,66 @@ final class AppModel: ObservableObject {
 
     func installHelper() {
         let service = SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName)
-        var registerError: HelperRegisterError?
-        if service.status != .enabled && service.status != .requiresApproval {
-            do {
-                try service.register()
-            } catch let error as NSError {
-                registerError = HelperRegisterError.classify(domain: error.domain, code: error.code, description: error.localizedDescription)
-            }
+        // 用户手动触发，别再让自动修复重复登记。
+        didAttemptRegistrationRepair = true
+        present(register(service), service, openSettings: true)
+        pollUntilReachable()
+    }
+
+    /// A registered daemon keeps the launch constraint recorded when it was registered, so an
+    /// ad-hoc re-signed build leaves a job that launchd can never spawn. Registering again once per
+    /// launch is what makes a rebuilt app work without a trip to System Settings.
+    private func repairStaleRegistrationIfNeeded() {
+        guard !didAttemptRegistrationRepair, registrationRepairTask == nil else { return }
+        let service = SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName)
+        guard HelperInstallRepair.action(status: Self.installStatus(service.status), reachable: helperReachable) != .none else {
+            return
+        }
+        // 给刚启动的 Helper 一点时间：一次连接失败可能只是启动竞争，那样不该动 BTM。
+        registrationRepairTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            registrationRepairTask = nil
+            guard !helperReachable else { return }
+            didAttemptRegistrationRepair = true
+            present(register(service), service, openSettings: false)
+            pollUntilReachable()
+        }
+    }
+
+    /// Registers (or re-registers) the Helper and returns the classification of a refusal. smd
+    /// refusing a pending item with EPERM is not a failure: the item is registered and waits for the
+    /// user to allow it.
+    private func register(_ service: SMAppService) -> HelperRegisterError? {
+        switch HelperInstallRepair.action(status: Self.installStatus(service.status), reachable: helperReachable) {
+        case .reregister:
+            try? service.unregister()
+        case .register, .none:
+            break
+        }
+        switch Self.installStatus(service.status) {
+        case .enabled, .requiresApproval:
+            return nil
+        case .notRegistered, .notFound:
+            break
+        }
+        do {
+            try service.register()
+            return nil
+        } catch let error as NSError {
+            return HelperRegisterError.classify(domain: error.domain, code: error.code, description: error.localizedDescription)
+        }
+    }
+
+    private func present(_ registerError: HelperRegisterError?, _ service: SMAppService, openSettings: Bool) {
+        // 登记被拒且条目已经在登录项里：这是“被关掉了”，不是签名或 plist 的错误。
+        if registerError == .notPermitted, Self.installStatus(service.status) != .requiresApproval {
+            installNotice = HelperInstallRepair.appReregistrationGuide
+            if openSettings { SMAppService.openSystemSettingsLoginItems() }
+            return
         }
         let outcome = HelperInstallOutcome.evaluate(statusAfter: Self.installStatus(service.status), registerError: registerError)
         installNotice = outcome.error ?? outcome.notice
-        if outcome.openLoginItems { SMAppService.openSystemSettingsLoginItems() }
-        pollUntilReachable()
+        if outcome.openLoginItems, openSettings { SMAppService.openSystemSettingsLoginItems() }
     }
 
     private static func installStatus(_ status: SMAppService.Status) -> HelperInstallStatus {
@@ -246,14 +298,54 @@ final class AppModel: ObservableObject {
         return PlatformError.helper("意外的响应")
     }
 
+    /// Confirms a change before it is applied. A Knodo import or a broad rule set produces hundreds
+    /// of diff lines, so anything longer than a few lines goes into a fixed-size scrollable box
+    /// instead of growing the alert until it covers the screen.
     static func confirm(title: String, lines: [String]) -> Bool {
         let alert = NSAlert()
         alert.messageText = title
-        alert.informativeText = lines.joined(separator: "\n")
         alert.addButton(withTitle: "确认")
         alert.addButton(withTitle: "取消")
+        let text = lines.joined(separator: "\n")
+        if text.count <= 480, lines.count <= 8 {
+            alert.informativeText = text
+        } else {
+            alert.informativeText = "共 \(lines.count) 行变更，滚动查看全部内容。"
+            alert.accessoryView = DiffTextView(text: text)
+        }
         NSApp.activate(ignoringOtherApps: true)
         return alert.runModal() == .alertFirstButtonReturn
     }
+}
+
+/// Read-only, word-wrapping, fixed-size text box for long change summaries.
+private final class DiffTextView: NSScrollView {
+    init(text: String) {
+        let size = NSSize(width: 620, height: 360)
+        super.init(frame: NSRect(origin: .zero, size: size))
+        hasVerticalScroller = true
+        hasHorizontalScroller = false
+        autohidesScrollers = true
+        borderType = .bezelBorder
+
+        let textView = NSTextView(frame: NSRect(origin: .zero, size: size))
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.drawsBackground = false
+        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: size.width, height: .greatestFiniteMagnitude)
+        textView.string = text
+        documentView = textView
+        textView.scrollToBeginningOfDocument(nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("DiffTextView 只支持代码创建") }
 }
 #endif
