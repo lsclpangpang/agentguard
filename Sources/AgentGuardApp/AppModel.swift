@@ -194,6 +194,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func acknowledgeCollectorProblems() {
+        send(.acknowledgeCollectorProblems)
+    }
+
     private func send(_ request: HelperRequest) {
         Task.detached { await self.sendAsync(request) }
     }

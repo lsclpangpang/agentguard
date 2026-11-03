@@ -115,7 +115,8 @@ struct MainView: View {
             Banner(text: "Helper 未运行。安装后在“系统设置 > 通用 > 登录项”中允许，并给 /usr/bin/eslogger 授予“完全磁盘访问”。", action: ("安装 Helper", model.installHelper))
         }
         if let problems = model.report?.collectorProblems, !problems.isEmpty {
-            Banner(text: "采集器：" + problems.joined(separator: "；") + "。未观测到不代表没有发生。", action: nil)
+            Banner(text: "采集器：" + problems.joined(separator: "；") + "。未观测到不代表没有发生。",
+                   action: ("已知悉", model.acknowledgeCollectorProblems))
         }
         Banner(text: "系统能力检查（M0）尚未实现：规则在本机是否真正拦截，需要用测试文件手动验证。", action: nil)
         if let error = model.lastError {

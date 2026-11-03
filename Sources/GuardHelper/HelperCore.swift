@@ -87,6 +87,11 @@ final class HelperCore {
             verifier: SystemAuthorizationVerifier(), settings: config.helperSettings,
             clock: Date.init, makeID: { UUID().uuidString.lowercased() }
         )
+        service?.onAcknowledgeCollectorProblems = { [weak self] in
+            guard let self else { return }
+            self.collector.acknowledge()
+            self.service?.updateCollectorHealth(self.collector.health())
+        }
         if started { refreshCollector() }
     }
 

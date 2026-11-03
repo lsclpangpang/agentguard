@@ -19,6 +19,11 @@ final class Collector {
         return monitor.health(at: Date())
     }
 
+    func acknowledge() {
+        lock.lock(); defer { lock.unlock() }
+        monitor.acknowledgeAll()
+    }
+
     private func record(_ signal: CollectorSignal) {
         lock.lock(); defer { lock.unlock() }
         monitor.record(signal, at: Date())
