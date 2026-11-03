@@ -104,8 +104,8 @@ struct MainWindow: View {
         if model.helperReachable {
             if model.needsFullDiskAccess {
                 items.append(Notice(kind: .warning,
-                                    text: "采集器没有完全磁盘访问权限。在“隐私与安全性 > 完全磁盘访问”中添加 /Applications/AgentGuard.app/Contents/MacOS/agentguard-helper（按 ⌘⇧G 输入路径）。",
-                                    actionTitle: "复制路径") { Pasteboard.copy("/Applications/AgentGuard.app/Contents/MacOS/agentguard-helper") })
+                                    text: "采集器没有完全磁盘访问权限。在“隐私与安全性 > 完全磁盘访问”中添加 \(AgentGuardConfig.collectorPath)（按 ⌘⇧G 输入路径）。",
+                                    actionTitle: "复制路径") { Pasteboard.copy(AgentGuardConfig.collectorPath) })
             }
             let others = model.helperProblems.filter { !$0.contains("未授权") }
             if !others.isEmpty {
@@ -150,7 +150,8 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Step(number: 1, title: "安装 Helper", detail: "点下面的按钮。第一次安装时系统会先拦下后台项目，这是正常的。")
                 Step(number: 2, title: "允许在后台运行", detail: "在“系统设置 > 通用 > 登录项 > 允许在后台”中打开 AgentGuard。")
-                Step(number: 3, title: "授予完全磁盘访问", detail: "在“隐私与安全性 > 完全磁盘访问”中添加 Contents/MacOS/agentguard-helper，用来观察受管程序的行为。")
+                Step(number: 3, title: "授予完全磁盘访问",
+                     detail: "在“隐私与安全性 > 完全磁盘访问”中添加 \(AgentGuardConfig.collectorPath)。采集器装在 App 包外，重装 App 不需要重新授权。")
             }
             .frame(maxWidth: 440)
             if let notice = model.installNotice {
