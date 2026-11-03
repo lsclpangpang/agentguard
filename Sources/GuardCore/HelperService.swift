@@ -150,6 +150,9 @@ public final class HelperService {
     private let settings: HelperSettings
     /// 启动器 cdhash 的短指纹；由 Helper 在启动时算好传进来（GuardCore 不依赖 CodeSigning）。
     private let launcherGeneration: String
+    /// 受管启动项的日志目录。必须落在属主可写的位置：launchd 以用户身份打开
+    /// StandardOutPath，指向 root 专属的 /Library/Logs 会让 spawn 直接 EX_CONFIG(78)。
+    private let managedLogDirectory: String
     private let clock: () -> Date
     private var ledger: ApprovalLedger
     private var tracker = InstanceTracker()
@@ -165,7 +168,7 @@ public final class HelperService {
 
     public init(store: ProfileStore, environment: CompileEnvironment, catalog: TemplateCatalog, trust: CallerTrustPolicy,
                 verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String,
-                launcherGeneration: String = "") {
+                launcherGeneration: String = "", managedLogDirectory: String = "") {
         self.store = store
         self.environment = environment
         self.compiler = PolicyCompiler(environment: environment)
@@ -175,6 +178,7 @@ public final class HelperService {
         self.verifier = verifier
         self.settings = settings
         self.launcherGeneration = launcherGeneration
+        self.managedLogDirectory = managedLogDirectory
         self.clock = clock
         self.ledger = ApprovalLedger(trust: trust, makeID: makeID)
     }
@@ -182,6 +186,16 @@ public final class HelperService {
     /// Feeds process lifecycle events from the collector.
     /// The bundled binaries are re-read from disk when they change, so a rebuilt — and therefore
     /// re-signed — app keeps working without restarting this root daemon.
+    /// Puts an instance that survived a Helper restart back into the tracker; without this the UI
+    /// reports a running managed agent as "已停止" until it is restarted.
+    public func instances(ofProfile profileID: String) -> [InstanceSnapshot] {
+        tracker.instances(ofProfile: profileID)
+    }
+
+    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey) {
+        tracker.register(instance: id, profileID: profileID, revision: revision, root: root)
+    }
+
     public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {
         trust.identities = identities
     }
@@ -351,7 +365,8 @@ public final class HelperService {
         let fingerprint = launcherGeneration
         let definition = LaunchAgentDefinition(labelPrefix: settings.labelPrefix, launcherPath: settings.launcherPath, profileID: profileID,
                                                runAtLoad: true, restartOnCleanExit: launch.restartOnCleanExit,
-                                               throttleInterval: settings.throttleInterval, logDirectory: settings.logDirectory,
+                                               throttleInterval: settings.throttleInterval,
+                                               logDirectory: managedLogDirectory.isEmpty ? settings.logDirectory : managedLogDirectory,
                                                generation: fingerprint)
         return (definition, launch)
     }

@@ -51,6 +51,7 @@ struct ProfileDetailView: View {
 }
 
 private struct ProfileHeader: View {
+    @EnvironmentObject var model: AppModel
     let profile: Profile
     let status: ProfileStatusReport?
     @State private var copied = false
@@ -91,7 +92,13 @@ private struct ProfileHeader: View {
 
     @ViewBuilder private var statusChips: some View {
         Chip(text: profile.mode.displayName, systemImage: profile.mode.symbol, tint: profile.mode.tint)
-        if let status {
+        if model.restartingProfiles.contains(profile.id) {
+            // 状态从“已停止/待生效”跳到“运行”中间有几秒，这里给出明确的过渡提示。
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("正在启动…").font(.callout).foregroundStyle(.secondary)
+            }
+        } else if let status {
             Chip(text: status.revisionState.displayText, tint: status.revisionState.tint)
             Chip(text: "修订 \(status.savedRevision)")
             if !status.runningInstances.isEmpty {
@@ -362,12 +369,23 @@ private struct LaunchCard: View {
         }
     }
 
+    private var isRestarting: Bool { model.restartingProfiles.contains(profile.id) }
+
     @ViewBuilder private var actions: some View {
-        Button("接管启动项") { model.installLaunchAgent(profile.id) }
-        Button("重启受管实例") { model.restartManaged(profile.id) }
-            .buttonStyle(.borderedProminent)
-        Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
-        Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
+        if isRestarting {
+            // 重启是“杀进程 → 重新 bootstrap → 等实例注册”的一整段，中间界面必须说话。
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在重启：结束旧实例，等待新实例注册…").foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        } else {
+            Button("接管启动项") { model.installLaunchAgent(profile.id) }
+            Button("重启受管实例") { model.restartManaged(profile.id) }
+                .buttonStyle(.borderedProminent)
+            Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
+            Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
+        }
     }
 }
 #endif

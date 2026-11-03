@@ -66,7 +66,10 @@ final class HelperCore {
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self else { return }
             let health = self.collector.health()
-            self.queue.async { self.service?.updateCollectorHealth(health) }
+            self.queue.async {
+                self.service?.updateCollectorHealth(health)
+                self.reconcileInstances()
+            }
         }
         refreshCollector()
     }
@@ -77,6 +80,10 @@ final class HelperCore {
             claimOwnershipIfNeeded(identity)
             if let service {
                 response = apply(service.handle(request, caller: identity, process: process), for: request)
+                if case let .registerInstance(profileID, revision) = request,
+                   case let .registered(instance, _) = response {
+                    recordInstance(profileID: profileID, instance: instance, revision: revision, root: process)
+                }
             } else {
                 response = .failure(code: "not_trusted")
             }
@@ -102,6 +109,10 @@ final class HelperCore {
     private func adopt(_ record: OwnerRecord) {
         owner = record
         let config = AgentGuardConfig(home: record.home, uid: record.uid, homebrewPrefix: AgentGuardConfig.detectHomebrewPrefix())
+        // 启动项的日志要在属主名下：launchd 用用户身份打开 StandardOutPath。
+        let ownerLogDirectory = record.home + "/Library/Logs/AgentGuard"
+        try? FileManager.default.createDirectory(atPath: ownerLogDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755, .ownerAccountID: record.uid], ofItemAtPath: ownerLogDirectory)
         for directory in [config.configRoot, config.stateRoot, config.releasesRoot, config.logDirectory, config.configRoot + "/backups"] {
             try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
         }
@@ -111,7 +122,8 @@ final class HelperCore {
             trust: CallerTrustPolicy(allowedUID: record.uid, identities: identities),
             verifier: SystemAuthorizationVerifier(), settings: config.helperSettings,
             clock: Date.init, makeID: { UUID().uuidString.lowercased() },
-            launcherGeneration: (try? CodeSigning.cdhash(atPath: config.helperSettings.launcherPath)).map { String($0.prefix(8)) } ?? ""
+            launcherGeneration: (try? CodeSigning.cdhash(atPath: config.helperSettings.launcherPath)).map { String($0.prefix(8)) } ?? "",
+            managedLogDirectory: record.home + "/Library/Logs/AgentGuard"
         )
         service?.onAcknowledgeCollectorProblems = { [weak self] in
             guard let self else { return }
@@ -119,6 +131,51 @@ final class HelperCore {
             self.service?.updateCollectorHealth(self.collector.health())
         }
         if started { refreshCollector() }
+        reconcileInstances()
+    }
+
+    /// 实例追踪表在内存里，Helper 一重启就空了，界面会把正在跑的受管对象误报成“已停止”。
+    /// 注册时把 root 进程的 pid + 启动时刻落盘，重启后按这两项核对再装回追踪表。
+    private struct InstanceRecord: Codable {
+        var instance: Int
+        var revision: Int
+        var pid: Int32
+        var startTime: UInt64
+    }
+
+    private func instanceRecordPath(_ profileID: String) -> String? {
+        config.map { $0.stateRoot + "/" + profileID + "/instance.json" }
+    }
+
+    private func recordInstance(profileID: String, instance: Int, revision: Int, root: ProcessKey) {
+        guard let path = instanceRecordPath(profileID),
+              let startTime = ProcessFacts.startTime(pid: root.pid) else { return }
+        let record = InstanceRecord(instance: instance, revision: revision, pid: root.pid, startTime: startTime)
+        try? JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    func reconcileInstances() {
+        guard let config, let service else { return }
+        for profileID in ((try? config.store.profileIDs()) ?? []) {
+            guard let path = instanceRecordPath(profileID),
+                  let data = FileManager.default.contents(atPath: path),
+                  let record = try? JSONDecoder().decode(InstanceRecord.self, from: data)
+            else { continue }
+            // 进程没了、或者 pid 被复用（启动时刻对不上）就当作已退出，别把陌生进程算进来。
+            guard kill(record.pid, 0) == 0,
+                  ProcessFacts.startTime(pid: record.pid) == record.startTime
+            else { continue }
+            // 恢复出来的进程用的是“pid + 启动时刻”，和 ES 事件里的 version 对不上，
+            // 所以退出的判定也在这里做：进程真没了就把它从追踪表里摘掉。
+            for instance in service.instances(ofProfile: profileID) {
+                for process in instance.liveProcesses where kill(process.pid, 0) != 0 {
+                    service.ingest(.exit(process))
+                }
+            }
+            if service.instances(ofProfile: profileID).contains(where: { $0.isRunning }) { continue }
+            service.restoreInstance(id: record.instance, profileID: profileID, revision: record.revision,
+                                    root: ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime)))
+        }
     }
 
     // MARK: Side effects

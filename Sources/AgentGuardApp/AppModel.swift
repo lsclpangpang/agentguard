@@ -14,6 +14,9 @@ final class AppModel: ObservableObject {
     @Published var revision = 0
     /// Install progress shown in the Helper banner; cleared as soon as the Helper answers.
     @Published var installNotice: String?
+    /// 正在重启的配置档。重启要 kill 旧进程再 bootstrap，几百毫秒到几秒不等；
+    /// 没有这个状态时界面会一动不动，看上去像没点中。
+    @Published var restartingProfiles: Set<String> = []
     private var pollTask: Task<Void, Never>?
     /// One registration repair per launch; see `repairStaleRegistrationIfNeeded`.
     private var didAttemptRegistrationRepair = false
@@ -264,7 +267,15 @@ final class AppModel: ObservableObject {
         Task {
             guard await Self.confirm(title: "重启 \(id) 的受管实例",
                                      lines: ["结束当前实例的进程", "按已保存的修订重新启动"]) else { return }
-            send(.restartManagedInstance(profileID: id))
+            restartingProfiles.insert(id)
+            defer { restartingProfiles.remove(id) }
+            await sendAsync(.restartManagedInstance(profileID: id))
+            // 实例注册来自启动器连上 Helper，通常几百毫秒；最多等 12 秒再放弃提示。
+            for _ in 0..<24 {
+                if report?.profiles.first(where: { $0.profileID == id })?.runningInstances.isEmpty == false { break }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                refresh()
+            }
         }
     }
 
