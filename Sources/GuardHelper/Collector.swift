@@ -13,10 +13,27 @@ final class Collector {
     private var eslogger: Process?
     private var logStream: Process?
     private var fileEvents: Bool?
+    private var backoff = RestartBackoff(base: 30, maximum: 600)
 
     func health() -> CollectorHealth {
         lock.lock(); defer { lock.unlock() }
         return monitor.health(at: Date())
+    }
+
+    func acknowledge() {
+        lock.lock(); defer { lock.unlock() }
+        monitor.acknowledgeAll()
+    }
+
+    private func recordProgress() {
+        lock.lock(); defer { lock.unlock() }
+        backoff.recordProgress()
+    }
+
+    /// Exponential while the collector keeps failing (for example without Full Disk Access).
+    private func nextRestartDelay() -> Double {
+        lock.lock(); defer { lock.unlock() }
+        return backoff.nextDelay()
     }
 
     private func record(_ signal: CollectorSignal) {
@@ -36,6 +53,7 @@ final class Collector {
             do {
                 let line = try ESLoggerParser.parse(text)
                 self.record(.event(sequence: line.globalSequence))
+                self.recordProgress()
                 self.onLine?(line)
             } catch {
                 self.record(.unparseableOutput)
@@ -78,8 +96,9 @@ final class Collector {
             output.fileHandleForReading.readabilityHandler = nil
             errors.fileHandleForReading.readabilityHandler = nil
             guard let restart else { return }
-            self?.record(.exited)
-            DispatchQueue.global().asyncAfter(deadline: .now() + 30) { restart() }
+            guard let self else { return }
+            self.record(.exited)
+            DispatchQueue.global().asyncAfter(deadline: .now() + self.nextRestartDelay()) { restart() }
         }
         do {
             try process.run()

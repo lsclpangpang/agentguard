@@ -108,14 +108,22 @@ struct MainView: View {
             }
         }
         .onAppear { model.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refresh() }
     }
 
     @ViewBuilder private var banners: some View {
         if !model.helperReachable {
-            Banner(text: "Helper 未运行。安装后在“系统设置 > 通用 > 登录项”中允许，并给 /usr/bin/eslogger 授予“完全磁盘访问”。", action: ("安装 Helper", model.installHelper))
+            Banner(text: model.installNotice
+                       ?? "Helper 未运行。点“安装 Helper”后在“系统设置 > 通用 > 登录项 > 允许在后台”中允许 AgentGuard。",
+                   action: ("安装 Helper", model.installHelper))
+        }
+        if let problems = model.report?.collectorProblems, problems.contains(where: { $0.contains("未授权") }) {
+            Banner(text: "在“隐私与安全性 > 完全磁盘访问”中添加 /Applications/AgentGuard.app/Contents/MacOS/agentguard-helper（按 ⌘⇧G 输入路径），eslogger 的授权按它判断。",
+                   action: nil)
         }
         if let problems = model.report?.collectorProblems, !problems.isEmpty {
-            Banner(text: "采集器：" + problems.joined(separator: "；") + "。未观测到不代表没有发生。", action: nil)
+            Banner(text: "采集器：" + problems.joined(separator: "；") + "。未观测到不代表没有发生。",
+                   action: ("已知悉", model.acknowledgeCollectorProblems))
         }
         Banner(text: "系统能力检查（M0）尚未实现：规则在本机是否真正拦截，需要用测试文件手动验证。", action: nil)
         if let error = model.lastError {

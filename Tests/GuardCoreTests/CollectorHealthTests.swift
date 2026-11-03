@@ -94,4 +94,27 @@ import Testing
         #expect(m.health(at: t0).problems.contains(problem))
         #expect(!m.health(at: t0).isHealthy)
     }
+
+    @Test func authorizationProblemClearsOnceEventsFlowAfterRestart() {
+        var m = started()
+        m.record(.authorizationDenied, at: t0)
+        m.record(.exited, at: t0)
+        #expect(m.health(at: t0).problems.contains(.unauthorized))
+        m.record(.started, at: t0.addingTimeInterval(30))
+        #expect(m.health(at: t0.addingTimeInterval(30)).problems.contains(.unauthorized))
+        m.record(.event(sequence: 1), at: t0.addingTimeInterval(31))
+        #expect(!m.health(at: t0.addingTimeInterval(31)).problems.contains(.unauthorized))
+    }
+
+    @Test func acknowledgeAllClearsHistoryButNotCurrentConditions() {
+        var m = started()
+        m.record(.event(sequence: 1), at: t0)
+        m.record(.event(sequence: 5), at: t0)
+        m.record(.exited, at: t0)
+        m.record(.started, at: t0)
+        m.record(.event(sequence: 1), at: t0)
+        m.record(.storageLimitReached, at: t0)
+        m.acknowledgeAll()
+        #expect(m.health(at: t0).problems == [.storageFull])
+    }
 }

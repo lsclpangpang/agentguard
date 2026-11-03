@@ -254,4 +254,13 @@ struct FakeVerifier: AuthorizationVerifier {
     @Test func pendingItemsRequireTheApp() {
         #expect(service().handle(.pendingItems(profileID: "knodo"), caller: F.cliCaller, process: cliProcess) == .failure(code: "not_trusted"))
     }
+
+    @Test func appCanAcknowledgeCollectorProblems() {
+        let s = service()
+        var acknowledged = 0
+        s.onAcknowledgeCollectorProblems = { acknowledged += 1 }
+        #expect(s.handle(.acknowledgeCollectorProblems, caller: F.cliCaller, process: cliProcess) == .failure(code: "not_trusted"))
+        #expect(s.handle(.acknowledgeCollectorProblems, caller: F.appCaller, process: appProcess) == .ok)
+        #expect(acknowledged == 1)
+    }
 }

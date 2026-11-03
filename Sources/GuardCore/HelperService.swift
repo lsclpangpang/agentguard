@@ -29,6 +29,7 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case reportVerification(instance: Int, passed: Bool)
     case installLaunchAgent(profileID: String)
     case pendingItems(profileID: String)
+    case acknowledgeCollectorProblems
     case removeManagement(profileID: String, restoreOriginal: Bool, authorization: Data?)
 }
 
@@ -133,6 +134,8 @@ public final class HelperService {
     private var collectorHealth = CollectorHealth(problems: [.notStarted])
     private let environment: CompileEnvironment
     private static let observationLimit = 5000
+    /// Set by the platform layer, which owns the collector's health monitor.
+    public var onAcknowledgeCollectorProblems: (() -> Void)?
 
     public init(store: ProfileStore, environment: CompileEnvironment, catalog: TemplateCatalog, trust: CallerTrustPolicy,
                 verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String) {
@@ -219,6 +222,10 @@ public final class HelperService {
             case let .installLaunchAgent(profileID):
                 try require(role, in: [.app])
                 return try installLaunchAgent(profileID)
+            case .acknowledgeCollectorProblems:
+                try require(role, in: [.app])
+                onAcknowledgeCollectorProblems?()
+                return .ok
             case let .pendingItems(profileID):
                 try require(role, in: [.app])
                 guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }

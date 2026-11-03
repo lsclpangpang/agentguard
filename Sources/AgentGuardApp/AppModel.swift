@@ -12,6 +12,9 @@ final class AppModel: ObservableObject {
     @Published var lastError: String?
     @Published var pending: [String: [PendingItem]] = [:]
     @Published var revision = 0
+    /// Install progress shown in the Helper banner; cleared as soon as the Helper answers.
+    @Published var installNotice: String?
+    private var pollTask: Task<Void, Never>?
 
     let config: AgentGuardConfig
 
@@ -46,6 +49,7 @@ final class AppModel: ObservableObject {
                 if case let .status(report) = status {
                     self.report = report
                     self.helperReachable = true
+                    self.installNotice = nil
                 } else {
                     self.report = nil
                     self.helperReachable = false
@@ -64,15 +68,39 @@ final class AppModel: ObservableObject {
 
     func installHelper() {
         let service = SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName)
-        do {
-            try service.register()
-        } catch {
-            lastError = "安装 Helper 失败：\(error.localizedDescription)"
+        var registerError: HelperRegisterError?
+        if service.status != .enabled && service.status != .requiresApproval {
+            do {
+                try service.register()
+            } catch let error as NSError {
+                registerError = HelperRegisterError.classify(domain: error.domain, code: error.code, description: error.localizedDescription)
+            }
         }
-        if service.status == .requiresApproval {
-            SMAppService.openSystemSettingsLoginItems()
+        let outcome = HelperInstallOutcome.evaluate(statusAfter: Self.installStatus(service.status), registerError: registerError)
+        installNotice = outcome.error ?? outcome.notice
+        if outcome.openLoginItems { SMAppService.openSystemSettingsLoginItems() }
+        pollUntilReachable()
+    }
+
+    private static func installStatus(_ status: SMAppService.Status) -> HelperInstallStatus {
+        switch status {
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        case .notFound: return .notFound
+        default: return .notRegistered
         }
-        refresh()
+    }
+
+    /// Approval happens in System Settings, outside the app; keep checking for a while afterwards.
+    private func pollUntilReachable() {
+        pollTask?.cancel()
+        pollTask = Task { @MainActor in
+            for _ in 0..<30 {
+                refresh()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if helperReachable || Task.isCancelled { break }
+            }
+        }
     }
 
     // MARK: Changes
@@ -192,6 +220,10 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.lastError = "\(error)" }
             }
         }
+    }
+
+    func acknowledgeCollectorProblems() {
+        send(.acknowledgeCollectorProblems)
     }
 
     private func send(_ request: HelperRequest) {

@@ -89,6 +89,8 @@ public struct CollectorHealthMonitor: Sendable {
             lastActivity = time
         case let .event(sequence):
             lastActivity = time
+            // A delivered event proves the collector is authorized now, whatever happened before.
+            conditions.remove(.unauthorized)
             if let last = lastSequence {
                 guard sequence > last else { return }
                 dropped += sequence - last - 1
@@ -119,4 +121,10 @@ public struct CollectorHealthMonitor: Sendable {
     public mutating func acknowledgeDroppedEvents() { dropped = 0 }
 
     public mutating func acknowledgeInterruption() { restartedAfterInterruption = false }
+
+    /// Clears what has already been reported (dropped events, past interruptions); current conditions stay.
+    public mutating func acknowledgeAll() {
+        acknowledgeDroppedEvents()
+        acknowledgeInterruption()
+    }
 }
