@@ -37,6 +37,7 @@ struct ProfileDetailView: View {
                 .frame(maxWidth: 900, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
+            .overlay(alignment: .top) { ScrollTopFade() }
             .background(Color(nsColor: .windowBackgroundColor))
             .navigationTitle(profileID)
         }
@@ -353,6 +354,29 @@ private struct LaunchCard: View {
             .buttonStyle(.borderedProminent)
         Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
         Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
+    }
+}
+
+/// 滚动内容在视口上沿会被硬切一半，正对工具栏下沿时尤其明显。macOS 只在内容滚到工具栏下面时
+/// 才画那层模糊，而这里的滚动视图被安全区挡住了，于是补一条同样的边缘淡化：顶部材质、向下渐隐，
+/// 滚动到顶时它压在页面上方的留白里，看不出来。
+private struct ScrollTopFade: View {
+    var body: some View {
+        Rectangle()
+            .fill(.regularMaterial)
+            .frame(height: 24)
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black.opacity(0.55), location: 0.55),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .allowsHitTesting(false)
     }
 }
 #endif
