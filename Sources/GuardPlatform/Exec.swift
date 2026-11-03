@@ -91,9 +91,13 @@ public enum ProcessFacts {
     /// Start time in microseconds since the epoch; stable across exec, so it distinguishes a live
     /// instance from a reused PID.
     public static func startTime(pid: Int32) -> UInt64? {
+        #if canImport(Darwin)
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
         return UInt64(info.pbi_start_tvsec) * 1_000_000 + UInt64(info.pbi_start_tvusec)
+        #else
+        return nil
+        #endif
     }
 }

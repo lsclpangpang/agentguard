@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(os)
+import os
+#endif
 
 /// Verifies the system authorization the user granted for one specific change (Authorization Services on macOS).
 public protocol AuthorizationVerifier: Sendable {
@@ -246,7 +249,16 @@ public final class HelperService {
         var caller = caller
         caller.managedInstance = tracker.owner(of: process)
         if caller.managedInstance != nil { return .failure(code: "managed_caller") }
-        guard let role = trust.role(of: caller) else { return .failure(code: "not_trusted") }
+        guard let role = trust.role(of: caller) else {
+            let known = trust.identities
+                .map { "\($0.key)=\($0.value.cdhashes.sorted().joined(separator: "|"))" }
+                .joined(separator: " ")
+            let detail = "id=\(caller.signingIdentifier) cdhash=\(caller.cdhash ?? "nil") uid=\(caller.uid) allowedUID=\(trust.allowedUID) 已知=\(known)"
+            #if canImport(os)
+            Logger(subsystem: "com.lsclpangpang.agentguard", category: "trust").error("\(detail, privacy: .public)")
+            #endif
+            return .failure(code: "not_trusted")
+        }
         do {
             switch request {
             case .status:

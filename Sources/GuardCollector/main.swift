@@ -73,6 +73,8 @@ private final class Subscribers {
 
 /// Runs one child process and restarts it with a growing delay while it keeps dying.
 private final class Child {
+    /// 订阅了哪一类事件；用来判断是否需要为“切到/切回学习模式”重启 eslogger。
+    let fileEvents: Bool
     private let name: String
     private let path: String
     private let arguments: [String]
@@ -82,7 +84,9 @@ private final class Child {
     private var backoff = RestartBackoff(base: 30, maximum: 600)
     private var stopping = false
 
-    init(name: String, path: String, arguments: [String], onLine: @escaping (String) -> Void, onStderr: @escaping (String) -> Void) {
+    init(name: String, path: String, arguments: [String], fileEvents: Bool = false,
+         onLine: @escaping (String) -> Void, onStderr: @escaping (String) -> Void) {
+        self.fileEvents = fileEvents
         self.name = name
         self.path = path
         self.arguments = arguments
@@ -182,13 +186,37 @@ DispatchQueue.global().async {
 private let running = DispatchGroup()
 running.enter()
 
-private let eslogger = Child(
-    name: "eslogger",
-    path: esloggerPath,
-    arguments: ["fork", "exec", "exit", "open", "create", "rename", "unlink", "close", "--format", "json"],
-    onLine: { subscribers.broadcast(CollectorWire.encode(.eslogger($0))) },
-    onStderr: { subscribers.broadcast(CollectorWire.encode(.error($0))) }
-)
+/// eslogger 的订阅集合：进程生命周期永远订阅，文件事件只在学习模式下加进来。
+private func esloggerArguments(fileEvents: Bool) -> [String] {
+    var events = ["fork", "exec", "exit"]
+    if fileEvents { events += ["open", "create", "rename", "unlink", "close"] }
+    return events + ["--format", "json"]
+}
+
+private let control = DispatchQueue(label: "com.lsclpangpang.agentguard.collector.control")
+private var eslogger: Child?
+
+private func refreshEslogger(fileEvents: Bool) {
+    control.async {
+        if let current = eslogger, current.fileEvents == fileEvents { return }
+        eslogger?.stop()
+        let child = Child(
+            name: "eslogger \(fileEvents ? "（含文件事件）" : "")",
+            path: esloggerPath,
+            arguments: esloggerArguments(fileEvents: fileEvents),
+            fileEvents: fileEvents,
+            onLine: { subscribers.broadcast(CollectorWire.encode(.eslogger($0))) },
+            onStderr: { subscribers.broadcast(CollectorWire.encode(.error($0))) }
+        )
+        eslogger = child
+        child.start()
+        FileHandle.standardError.write(Data("eslogger 订阅已切换：fileEvents=\(fileEvents)\n".utf8))
+    }
+}
+
+private func fileEventsEnabled() -> Bool {
+    FileManager.default.fileExists(atPath: AgentGuardConfig.collectorFileEventsFlagPath)
+}
 private let sandboxLog = Child(
     name: "log stream",
     path: logPath,
@@ -201,7 +229,7 @@ for signalNumber in [SIGTERM, SIGINT] {
     signal(signalNumber, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
     source.setEventHandler {
-        eslogger.stop()
+        eslogger?.stop()
         sandboxLog.stop()
         unlink(socketPath)
         running.leave()
@@ -210,7 +238,13 @@ for signalNumber in [SIGTERM, SIGINT] {
     source.resume()
 }
 
-eslogger.start()
+refreshEslogger(fileEvents: fileEventsEnabled())
+
+let flagWatch = DispatchSource.makeTimerSource(queue: .global())
+flagWatch.schedule(deadline: .now() + 5, repeating: 5)
+flagWatch.setEventHandler { refreshEslogger(fileEvents: fileEventsEnabled()) }
+flagWatch.resume()
+
 sandboxLog.start()
 running.wait()
 #else

@@ -22,6 +22,11 @@ struct MainWindow: View {
         .sheet(isPresented: $creating) {
             NewProfileSheet(isPresented: $creating).environmentObject(model)
         }
+        // When a sheet closes AppKit hands focus to the window's first text field, the port field near
+        // the bottom, and scrolls the detail view down to it.
+        .sheet(item: $model.confirmation, onDismiss: { NSApp.keyWindow?.makeFirstResponder(nil) }) { pending in
+            ConfirmationSheet(pending: pending) { model.answerConfirmation($0) }
+        }
         .background(WindowAccessor { MainWindowBehavior.apply(pinned: pinned, to: $0) })
         .toolbar {
             ToolbarItem(placement: .automatic) {

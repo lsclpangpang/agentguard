@@ -1,9 +1,18 @@
 #if os(macOS)
 import AppKit
+import os
 import Foundation
 import GuardCore
 import GuardPlatform
 import ServiceManagement
+
+/// 一次等待作答的确认，由窗口内的 sheet 呈现。
+struct PendingConfirmation: Identifiable {
+    let id = UUID()
+    let title: String
+    let lines: [String]
+    let continuation: CheckedContinuation<Bool, Never>
+}
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -17,6 +26,9 @@ final class AppModel: ObservableObject {
     /// 正在重启的配置档。重启要 kill 旧进程再 bootstrap，几百毫秒到几秒不等；
     /// 没有这个状态时界面会一动不动，看上去像没点中。
     @Published var restartingProfiles: Set<String> = []
+    /// 待确认的变更。用窗口内的 SwiftUI sheet 呈现：NSAlert 的 sheet 在菜单栏 App 上会挂到
+    /// 看不见的窗口上，用户点不动、也关不掉，整个界面看起来就是“只有滚轮活着”。
+    @Published var confirmation: PendingConfirmation?
     private var pollTask: Task<Void, Never>?
     /// One registration repair per launch; see `repairStaleRegistrationIfNeeded`.
     private var didAttemptRegistrationRepair = false
@@ -165,15 +177,19 @@ final class AppModel: ObservableObject {
     /// authentication when the change widens permissions.
     func submit(_ profile: Profile) {
         Task.detached {
+            let logger = Logger(subsystem: "com.lsclpangpang.agentguard", category: "ui")
             do {
                 let client = HelperClient()
+                logger.debug("submit: 开始 propose \(profile.id, privacy: .public) rev\(profile.revision) mode=\(String(describing: profile.mode), privacy: .public)")
                 let proposal = try client.send(.proposeChange(profile: profile))
+                logger.debug("submit: propose 返回 \(String(describing: proposal).prefix(120), privacy: .public)")
                 guard case let .pending(info) = proposal else { throw Self.failure(proposal) }
                 if info.summary.isEmpty {
+                    logger.debug("submit: 差异为空，标记没有变化")
                     await MainActor.run { self.lastError = "没有变化" }
                     return
                 }
-                let confirmed = await Self.confirm(title: "确认权限变更：\(profile.id)", lines: info.summary)
+                let confirmed = await self.askConfirmation("确认权限变更：\(profile.id)", info.summary)
                 guard confirmed else { return }
                 var token: Data?
                 if info.requiresAuthorization {
@@ -184,6 +200,7 @@ final class AppModel: ObservableObject {
                 guard case .applied = result else { throw Self.failure(result) }
                 await MainActor.run { self.lastError = nil }
             } catch {
+                logger.error("submit: 失败 \(String(describing: error), privacy: .public)")
                 await MainActor.run { self.lastError = "\(error)" }
             }
             await MainActor.run { self.refresh() }
@@ -253,7 +270,7 @@ final class AppModel: ObservableObject {
                                                    originalLabel: "com.knodo.restricted-agent", restartOnCleanExit: true)
             Task {
                 if !result.unimportedRules.isEmpty {
-                    _ = await Self.confirm(title: "以下规则无法导入，请手动核对", lines: result.unimportedRules)
+                    _ = await askConfirmation("以下规则无法导入，请手动核对", result.unimportedRules)
                 }
                 submit(result.profile)
             }
@@ -265,8 +282,7 @@ final class AppModel: ObservableObject {
     /// 改完规则后旧进程还在按老沙箱跑，重启后新修订才算生效。
     func restartManaged(_ id: String) {
         Task {
-            guard await Self.confirm(title: "重启 \(id) 的受管实例",
-                                     lines: ["结束当前实例的进程", "按已保存的修订重新启动"]) else { return }
+            guard await askConfirmation("重启 \(id) 的受管实例", ["结束当前实例的进程", "按已保存的修订重新启动"]) else { return }
             restartingProfiles.insert(id)
             defer { restartingProfiles.remove(id) }
             await sendAsync(.restartManagedInstance(profileID: id))
@@ -281,7 +297,7 @@ final class AppModel: ObservableObject {
 
     func installLaunchAgent(_ id: String) {
         Task {
-            guard await Self.confirm(title: "接管 \(id) 的启动项", lines: ["停止原启动项并备份", "以后由 AgentGuard 启动器在沙箱内启动"]) else { return }
+            guard await askConfirmation("接管 \(id) 的启动项", ["停止原启动项并备份", "以后由 AgentGuard 启动器在沙箱内启动"]) else { return }
             send(.installLaunchAgent(profileID: id))
         }
     }
@@ -289,7 +305,7 @@ final class AppModel: ObservableObject {
     func removeManagement(_ id: String, restoreOriginal: Bool) {
         let lines = restoreOriginal ? ["停止受管实例", "恢复原启动项：之后将无限制运行"] : ["停止受管实例并移除启动项", "不恢复原启动项"]
         Task {
-            guard await Self.confirm(title: "移除 \(id) 的管控", lines: lines) else { return }
+            guard await askConfirmation("移除 \(id) 的管控", lines) else { return }
             removeManagementConfirmed(id, restoreOriginal: restoreOriginal)
         }
     }
@@ -329,65 +345,23 @@ final class AppModel: ObservableObject {
         return PlatformError.helper("意外的响应")
     }
 
-    /// Confirms a change before it is applied. A Knodo import or a broad rule set produces hundreds
-    /// of diff lines, so anything longer than a few lines goes into a fixed-size scrollable box
-    /// instead of growing the alert until it covers the screen.
-    /// It is a sheet on the main window: an app-modal alert floats free of the
-    /// window, can end up behind it, and blocks scrolling and clicks in every window until answered.
-    static func confirm(title: String, lines: [String]) async -> Bool {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.addButton(withTitle: "确认")
-        alert.addButton(withTitle: "取消")
-        let text = lines.joined(separator: "\n")
-        if text.count <= 480, lines.count <= 8 {
-            alert.informativeText = text
-        } else {
-            alert.informativeText = "共 \(lines.count) 行变更，滚动查看全部内容。"
-            alert.accessoryView = DiffTextView(text: text)
+    /// 弹出一个窗口内的确认 sheet，并等到用户作答。
+    func askConfirmation(_ title: String, _ lines: [String]) async -> Bool {
+        if let existing = confirmation {
+            // 同一时刻只允许一个确认；已有的直接当作取消，避免请求悬挂。
+            existing.continuation.resume(returning: false)
+            confirmation = nil
         }
-        NSApp.activate(ignoringOtherApps: true)
-        if let window = mainWindow {
-            window.makeKeyAndOrderFront(nil)
-            return await alert.beginSheetModal(for: window) == .alertFirstButtonReturn
+        Logger(subsystem: "com.lsclpangpang.agentguard", category: "ui").debug("显示确认 sheet：\(title, privacy: .public)")
+        return await withCheckedContinuation { continuation in
+            confirmation = PendingConfirmation(title: title, lines: lines, continuation: continuation)
         }
-        return alert.runModal() == .alertFirstButtonReturn
     }
 
-    /// The SwiftUI `Window(id: "main")`; its NSWindow identifier starts with the scene id.
-    private static var mainWindow: NSWindow? {
-        NSApp.windows.first { $0.isVisible && $0.identifier?.rawValue.hasPrefix("main") == true }
+    func answerConfirmation(_ approved: Bool) {
+        guard let pending = confirmation else { return }
+        confirmation = nil
+        pending.continuation.resume(returning: approved)
     }
-}
-
-/// Read-only, word-wrapping, fixed-size text box for long change summaries.
-private final class DiffTextView: NSScrollView {
-    init(text: String) {
-        let size = NSSize(width: 620, height: 360)
-        super.init(frame: NSRect(origin: .zero, size: size))
-        hasVerticalScroller = true
-        hasHorizontalScroller = false
-        autohidesScrollers = true
-        borderType = .bezelBorder
-
-        let textView = NSTextView(frame: NSRect(origin: .zero, size: size))
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.isRichText = false
-        textView.drawsBackground = false
-        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        textView.textContainerInset = NSSize(width: 6, height: 6)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.containerSize = NSSize(width: size.width, height: .greatestFiniteMagnitude)
-        textView.string = text
-        documentView = textView
-        textView.scrollToBeginningOfDocument(nil)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("DiffTextView 只支持代码创建") }
 }
 #endif

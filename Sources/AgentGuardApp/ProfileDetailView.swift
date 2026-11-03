@@ -8,42 +8,36 @@ struct ProfileDetailView: View {
 
     var body: some View {
         if let profile = model.profile(profileID) {
-            VStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 14) {
-                    ProfileHeader(profile: profile, status: model.status(for: profileID))
-                    HStack(spacing: 12) {
-                        Text("保护模式").font(.callout.weight(.medium))
-                        Picker("保护模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
-                            Text(Mode.restrictedLearning.displayName).tag(Mode.restrictedLearning)
-                            Text(Mode.enforce.displayName).tag(Mode.enforce)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ProfileHeader(profile: profile, status: model.status(for: profileID))
+                        HStack(spacing: 12) {
+                            Text("保护模式").font(.callout.weight(.medium))
+                            Picker("保护模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
+                                Text(Mode.restrictedLearning.displayName).tag(Mode.restrictedLearning)
+                                Text(Mode.enforce.displayName).tag(Mode.enforce)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(maxWidth: 260)
+                            .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
+                            Spacer(minLength: 0)
                         }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(maxWidth: 260)
-                        .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
-                        Spacer(minLength: 0)
                     }
+                    .padding(.bottom, 4)
+
+                    PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
+                    FilesCard(profile: profile)
+                    TemplatesCard(profile: profile)
+                    ProgramsAndNetworkCard(profile: profile)
+                    if profile.launch != nil { LaunchCard(profile: profile) }
                 }
                 .padding(20)
                 .frame(maxWidth: 900, alignment: .leading)
                 .frame(maxWidth: .infinity)
-
-                Divider()
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
-                        FilesCard(profile: profile)
-                        TemplatesCard(profile: profile)
-                        ProgramsAndNetworkCard(profile: profile)
-                        if profile.launch != nil { LaunchCard(profile: profile) }
-                    }
-                    .padding(20)
-                    .frame(maxWidth: 900, alignment: .leading)
-                    .frame(maxWidth: .infinity)
-                }
-                .clipped()
             }
+            .overlay(alignment: .top) { ScrollTopFade() }
             .background(Color(nsColor: .windowBackgroundColor))
             .navigationTitle(profileID)
         }
@@ -386,6 +380,29 @@ private struct LaunchCard: View {
             Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
             Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
         }
+    }
+}
+
+/// 滚动内容在视口上沿会被硬切一半，正对工具栏下沿时尤其明显。macOS 只在内容滚到工具栏下面时
+/// 才画那层模糊，而这里的滚动视图被安全区挡住了，于是补一条同样的边缘淡化：顶部材质、向下渐隐，
+/// 滚动到顶时它压在页面上方的留白里，看不出来。
+private struct ScrollTopFade: View {
+    var body: some View {
+        Rectangle()
+            .fill(.regularMaterial)
+            .frame(height: 24)
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black.opacity(0.55), location: 0.55),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .allowsHitTesting(false)
     }
 }
 #endif
