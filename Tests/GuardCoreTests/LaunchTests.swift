@@ -88,10 +88,16 @@ import Testing
         #expect(definition.label == "com.example.agentguard.managed.knodo")
     }
 
-    @Test func keepAliveIsUnconditionalWhenRestartingAfterCleanExit() throws {
-        let definition = LaunchAgentDefinition(labelPrefix: "p", launcherPath: "/l", profileID: "knodo", runAtLoad: true, restartOnCleanExit: true,
-                                               throttleInterval: 10, logDirectory: "/tmp")
-        let plist = try #require(try PropertyListSerialization.propertyList(from: definition.xmlData(), format: nil) as? [String: Any])
-        #expect(plist["KeepAlive"] as? Bool == true)
+    /// `KeepAlive = true` 会让 launchd 要求一条可校验的 LWCR；指向 App 包内 ad-hoc 签名的启动器时
+    /// 这条要求满足不了，posix_spawn 直接 0xd/EX_CONFIG，任务永远起不来。所以两种情况都只声明
+    /// “异常退出后重来”。
+    @Test func keepAliveNeverAsksForAnUnconditionalConstraint() throws {
+        for restartOnCleanExit in [true, false] {
+            let definition = LaunchAgentDefinition(labelPrefix: "p", launcherPath: "/l", profileID: "knodo", runAtLoad: true,
+                                                   restartOnCleanExit: restartOnCleanExit, throttleInterval: 10, logDirectory: "/tmp")
+            let plist = try #require(try PropertyListSerialization.propertyList(from: definition.xmlData(), format: nil) as? [String: Any])
+            #expect(plist["KeepAlive"] as? Bool == nil)
+            #expect((plist["KeepAlive"] as? [String: Bool])?["SuccessfulExit"] == false)
+        }
     }
 }

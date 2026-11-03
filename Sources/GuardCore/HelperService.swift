@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(os)
+import os
+#endif
 
 /// Verifies the system authorization the user granted for one specific change (Authorization Services on macOS).
 public protocol AuthorizationVerifier: Sendable {
@@ -31,6 +34,8 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case pendingItems(profileID: String)
     case acknowledgeCollectorProblems
     case removeManagement(profileID: String, restoreOriginal: Bool, authorization: Data?)
+    /// 重启受管实例：改完规则后旧进程还按老沙箱在跑，必须重启才会装载新规则。
+    case restartManagedInstance(profileID: String)
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -58,14 +63,34 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var revisionState: RevisionState
     public var runningInstances: [Int]
     public var pendingCount: Int
+    /// Running instances whose launchd entry has exited; see `InstanceSnapshot.detachedFromLaunchd`.
+    public var detachedInstances: [Int]
 
-    public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int) {
+    public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int,
+                detachedInstances: [Int] = []) {
         self.profileID = profileID
         self.savedRevision = savedRevision
         self.mode = mode
         self.revisionState = revisionState
         self.runningInstances = runningInstances
         self.pendingCount = pendingCount
+        self.detachedInstances = detachedInstances
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances
+    }
+
+    /// The app and the helper are updated separately; a report from an older helper has no `detachedInstances`.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        profileID = try c.decode(String.self, forKey: .profileID)
+        savedRevision = try c.decode(Int.self, forKey: .savedRevision)
+        mode = try c.decode(Mode.self, forKey: .mode)
+        revisionState = try c.decode(RevisionState.self, forKey: .revisionState)
+        runningInstances = try c.decode([Int].self, forKey: .runningInstances)
+        pendingCount = try c.decode(Int.self, forKey: .pendingCount)
+        detachedInstances = try c.decodeIfPresent([Int].self, forKey: .detachedInstances) ?? []
     }
 }
 
@@ -90,6 +115,8 @@ public enum HelperResponse: Codable, Equatable, Sendable {
     /// The platform layer removes `label`; it restores the original item only when `restoreOriginalLabel` is set.
     case removal(label: String, restoreOriginalLabel: String?)
     case pendingItems([PendingItem])
+    /// 平台层先结束 `pids` 里的进程，再用 `plist` 重新注册 `label`。
+    case restartManaged(label: String, originalLabel: String?, plist: Data, pids: [Int32])
     case ok
     case failure(code: String)
 }
@@ -124,6 +151,11 @@ public final class HelperService {
     private var trust: CallerTrustPolicy
     private let verifier: any AuthorizationVerifier
     private let settings: HelperSettings
+    /// 启动器 cdhash 的短指纹；由 Helper 在启动时算好传进来（GuardCore 不依赖 CodeSigning）。
+    private let launcherGeneration: String
+    /// 受管启动项的日志目录。必须落在属主可写的位置：launchd 以用户身份打开
+    /// StandardOutPath，指向 root 专属的 /Library/Logs 会让 spawn 直接 EX_CONFIG(78)。
+    private let managedLogDirectory: String
     private let clock: () -> Date
     private var ledger: ApprovalLedger
     private var tracker = InstanceTracker()
@@ -138,7 +170,8 @@ public final class HelperService {
     public var onAcknowledgeCollectorProblems: (() -> Void)?
 
     public init(store: ProfileStore, environment: CompileEnvironment, catalog: TemplateCatalog, trust: CallerTrustPolicy,
-                verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String) {
+                verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String,
+                launcherGeneration: String = "", managedLogDirectory: String = "") {
         self.store = store
         self.environment = environment
         self.compiler = PolicyCompiler(environment: environment)
@@ -147,6 +180,8 @@ public final class HelperService {
         self.trust = trust
         self.verifier = verifier
         self.settings = settings
+        self.launcherGeneration = launcherGeneration
+        self.managedLogDirectory = managedLogDirectory
         self.clock = clock
         self.ledger = ApprovalLedger(trust: trust, makeID: makeID)
     }
@@ -154,6 +189,16 @@ public final class HelperService {
     /// Feeds process lifecycle events from the collector.
     /// The bundled binaries are re-read from disk when they change, so a rebuilt — and therefore
     /// re-signed — app keeps working without restarting this root daemon.
+    /// Puts an instance that survived a Helper restart back into the tracker; without this the UI
+    /// reports a running managed agent as "已停止" until it is restarted.
+    public func instances(ofProfile profileID: String) -> [InstanceSnapshot] {
+        tracker.instances(ofProfile: profileID)
+    }
+
+    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool) {
+        tracker.register(instance: id, profileID: profileID, revision: revision, root: root, supervisedByLaunchd: supervisedByLaunchd)
+    }
+
     public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {
         trust.identities = identities
     }
@@ -204,7 +249,16 @@ public final class HelperService {
         var caller = caller
         caller.managedInstance = tracker.owner(of: process)
         if caller.managedInstance != nil { return .failure(code: "managed_caller") }
-        guard let role = trust.role(of: caller) else { return .failure(code: "not_trusted") }
+        guard let role = trust.role(of: caller) else {
+            let known = trust.identities
+                .map { "\($0.key)=\($0.value.cdhashes.sorted().joined(separator: "|"))" }
+                .joined(separator: " ")
+            let detail = "id=\(caller.signingIdentifier) cdhash=\(caller.cdhash ?? "nil") uid=\(caller.uid) allowedUID=\(trust.allowedUID) 已知=\(known)"
+            #if canImport(os)
+            Logger(subsystem: "com.lsclpangpang.agentguard", category: "trust").error("\(detail, privacy: .public)")
+            #endif
+            return .failure(code: "not_trusted")
+        }
         do {
             switch request {
             case .status:
@@ -220,7 +274,7 @@ public final class HelperService {
                 return try tighten(profile, caller: caller)
             case let .registerInstance(profileID, revision):
                 try require(role, in: [.cli, .launcher])
-                return try register(profileID: profileID, revision: revision, process: process)
+                return try register(profileID: profileID, revision: revision, process: process, supervisedByLaunchd: role == .launcher)
             case let .reportVerification(instance, passed):
                 try require(role, in: [.app, .launcher])
                 verified[instance] = passed
@@ -239,6 +293,9 @@ public final class HelperService {
             case let .removeManagement(profileID, restoreOriginal, authorization):
                 try require(role, in: [.app])
                 return try removeManagement(profileID, restoreOriginal: restoreOriginal, token: authorization)
+            case let .restartManagedInstance(profileID):
+                try require(role, in: [.app])
+                return try restartManaged(profileID)
             }
         } catch let failure as Failure {
             return .failure(code: failure.code)
@@ -299,13 +356,13 @@ public final class HelperService {
         return .applied(revision: approved.newRevision)
     }
 
-    private func register(profileID: String, revision: Int, process: ProcessKey) throws -> HelperResponse {
+    private func register(profileID: String, revision: Int, process: ProcessKey, supervisedByLaunchd: Bool) throws -> HelperResponse {
         guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
         guard latest.revision == revision else { throw Failure(code: "stale_revision") }
         let sbpl = renderer.render(try compiler.compile(latest, catalog: catalog))
         let instance = nextInstance
         nextInstance += 1
-        tracker.register(instance: instance, profileID: profileID, revision: revision, root: process)
+        tracker.register(instance: instance, profileID: profileID, revision: revision, root: process, supervisedByLaunchd: supervisedByLaunchd)
         return .registered(instance: instance, sbpl: sbpl)
     }
 
@@ -315,15 +372,29 @@ public final class HelperService {
     private func launchDefinition(_ profileID: String) throws -> (LaunchAgentDefinition, LaunchSettings) {
         guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
         guard let launch = latest.launch else { throw Failure(code: "no_launch_settings") }
+        // 启动器每次重编都会重签，把它的 cdhash 前 8 位带进 label：launchd 的 BTM 记录按 label
+        // 缓存 LWCR，不换 label 的话重编后任务会以 EX_CONFIG(78) 起不来。
+        let fingerprint = launcherGeneration
         let definition = LaunchAgentDefinition(labelPrefix: settings.labelPrefix, launcherPath: settings.launcherPath, profileID: profileID,
                                                runAtLoad: true, restartOnCleanExit: launch.restartOnCleanExit,
-                                               throttleInterval: settings.throttleInterval, logDirectory: settings.logDirectory)
+                                               throttleInterval: settings.throttleInterval,
+                                               logDirectory: managedLogDirectory.isEmpty ? settings.logDirectory : managedLogDirectory,
+                                               generation: fingerprint)
         return (definition, launch)
     }
 
     private func installLaunchAgent(_ profileID: String) throws -> HelperResponse {
         let (definition, launch) = try launchDefinition(profileID)
         return .launchAgent(label: definition.label, originalLabel: launch.originalLabel, plist: try definition.xmlData())
+    }
+
+    private func restartManaged(_ profileID: String) throws -> HelperResponse {
+        let (definition, launch) = try launchDefinition(profileID)
+        let pids = tracker.instances(ofProfile: profileID)
+            .flatMap { $0.liveProcesses.map(\.pid) }
+            .sorted()
+        return .restartManaged(label: definition.label, originalLabel: launch.originalLabel,
+                               plist: try definition.xmlData(), pids: pids)
     }
 
     private func removeManagement(_ profileID: String, restoreOriginal: Bool, token: Data?) throws -> HelperResponse {
@@ -345,7 +416,8 @@ public final class HelperService {
                 mode: latest.mode,
                 revisionState: RevisionState.evaluate(savedRevision: latest.revision, instances: instances, verified: verified),
                 runningInstances: instances.filter(\.isRunning).map(\.id),
-                pendingCount: try pendingItems(for: latest).count
+                pendingCount: try pendingItems(for: latest).count,
+                detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id)
             )
         }
         return StatusReport(profiles: profiles, collectorProblems: collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description))

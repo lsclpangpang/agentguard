@@ -8,42 +8,36 @@ struct ProfileDetailView: View {
 
     var body: some View {
         if let profile = model.profile(profileID) {
-            VStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 14) {
-                    ProfileHeader(profile: profile, status: model.status(for: profileID))
-                    HStack(spacing: 12) {
-                        Text("保护模式").font(.callout.weight(.medium))
-                        Picker("保护模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
-                            Text(Mode.restrictedLearning.displayName).tag(Mode.restrictedLearning)
-                            Text(Mode.enforce.displayName).tag(Mode.enforce)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ProfileHeader(profile: profile, status: model.status(for: profileID))
+                        HStack(spacing: 12) {
+                            Text("保护模式").font(.callout.weight(.medium))
+                            Picker("保护模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
+                                Text(Mode.restrictedLearning.displayName).tag(Mode.restrictedLearning)
+                                Text(Mode.enforce.displayName).tag(Mode.enforce)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(maxWidth: 260)
+                            .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
+                            Spacer(minLength: 0)
                         }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(maxWidth: 260)
-                        .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
-                        Spacer(minLength: 0)
                     }
+                    .padding(.bottom, 4)
+
+                    PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
+                    FilesCard(profile: profile)
+                    TemplatesCard(profile: profile)
+                    ProgramsAndNetworkCard(profile: profile)
+                    if profile.launch != nil { LaunchCard(profile: profile) }
                 }
                 .padding(20)
                 .frame(maxWidth: 900, alignment: .leading)
                 .frame(maxWidth: .infinity)
-
-                Divider()
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
-                        FilesCard(profile: profile)
-                        TemplatesCard(profile: profile)
-                        ProgramsAndNetworkCard(profile: profile)
-                        if profile.launch != nil { LaunchCard(profile: profile) }
-                    }
-                    .padding(20)
-                    .frame(maxWidth: 900, alignment: .leading)
-                    .frame(maxWidth: .infinity)
-                }
-                .clipped()
             }
+            .overlay(alignment: .top) { ScrollTopFade() }
             .background(Color(nsColor: .windowBackgroundColor))
             .navigationTitle(profileID)
         }
@@ -51,6 +45,7 @@ struct ProfileDetailView: View {
 }
 
 private struct ProfileHeader: View {
+    @EnvironmentObject var model: AppModel
     let profile: Profile
     let status: ProfileStatusReport?
     @State private var copied = false
@@ -91,11 +86,20 @@ private struct ProfileHeader: View {
 
     @ViewBuilder private var statusChips: some View {
         Chip(text: profile.mode.displayName, systemImage: profile.mode.symbol, tint: profile.mode.tint)
-        if let status {
+        if model.restartingProfiles.contains(profile.id) {
+            // 状态从“已停止/待生效”跳到“运行”中间有几秒，这里给出明确的过渡提示。
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("正在启动…").font(.callout).foregroundStyle(.secondary)
+            }
+        } else if let status {
             Chip(text: status.revisionState.displayText, tint: status.revisionState.tint)
             Chip(text: "修订 \(status.savedRevision)")
             if !status.runningInstances.isEmpty {
                 Chip(text: "\(status.runningInstances.count) 个运行实例", systemImage: "bolt.fill", tint: .green)
+            }
+            if !status.detachedInstances.isEmpty {
+                Chip(text: "已脱离 launchd 看护", systemImage: "exclamationmark.triangle.fill", tint: .orange)
             }
         }
     }
@@ -343,6 +347,10 @@ private struct LaunchCard: View {
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+                    if !(model.status(for: profile.id)?.detachedInstances.isEmpty ?? true) {
+                        Notice(kind: .warning,
+                               text: "启动入口已经退出，但它启动的进程还在运行。launchd 只看护入口进程，这些进程崩溃后不会被自动拉起。请让入口脚本用 exec 在前台运行目标程序，不要用 & 或 nohup 把它放到后台。")
+                    }
                     if let original = launch.originalLabel {
                         Label("原启动项：\(original)", systemImage: "arrow.uturn.backward").font(.callout).foregroundStyle(.secondary)
                     }
@@ -355,11 +363,46 @@ private struct LaunchCard: View {
         }
     }
 
+    private var isRestarting: Bool { model.restartingProfiles.contains(profile.id) }
+
     @ViewBuilder private var actions: some View {
-        Button("接管启动项") { model.installLaunchAgent(profile.id) }
-            .buttonStyle(.borderedProminent)
-        Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
-        Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
+        if isRestarting {
+            // 重启是“杀进程 → 重新 bootstrap → 等实例注册”的一整段，中间界面必须说话。
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在重启：结束旧实例，等待新实例注册…").foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        } else {
+            Button("接管启动项") { model.installLaunchAgent(profile.id) }
+            Button("重启受管实例") { model.restartManaged(profile.id) }
+                .buttonStyle(.borderedProminent)
+            Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
+            Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
+        }
+    }
+}
+
+/// 滚动内容在视口上沿会被硬切一半，正对工具栏下沿时尤其明显。macOS 只在内容滚到工具栏下面时
+/// 才画那层模糊，而这里的滚动视图被安全区挡住了，于是补一条同样的边缘淡化：顶部材质、向下渐隐，
+/// 滚动到顶时它压在页面上方的留白里，看不出来。
+private struct ScrollTopFade: View {
+    var body: some View {
+        Rectangle()
+            .fill(.regularMaterial)
+            .frame(height: 24)
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black.opacity(0.55), location: 0.55),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .allowsHitTesting(false)
     }
 }
 #endif

@@ -29,13 +29,16 @@ public struct ObjectStatus: Equatable, Sendable {
     public var revision: RevisionState
     public var pendingItems: Int
     public var unmanagedInstances: Int
+    public var detachedInstances: Int
 
-    public init(profileID: String, protection: ProtectionState, revision: RevisionState, pendingItems: Int, unmanagedInstances: Int) {
+    public init(profileID: String, protection: ProtectionState, revision: RevisionState, pendingItems: Int, unmanagedInstances: Int,
+                detachedInstances: Int = 0) {
         self.profileID = profileID
         self.protection = protection
         self.revision = revision
         self.pendingItems = pendingItems
         self.unmanagedInstances = unmanagedInstances
+        self.detachedInstances = detachedInstances
     }
 }
 
@@ -73,6 +76,7 @@ public struct OverallStatus: Equatable, Sendable {
             case .unknown: findings.append((.attention, "\(name)：保护状态未知"))
             }
             if object.unmanagedInstances > 0 { findings.append((.problem, "\(name)：发现 \(object.unmanagedInstances) 个未受管实例")) }
+            if object.detachedInstances > 0 { findings.append((.attention, "\(name)：已脱离 launchd 看护")) }
             switch object.revision {
             case .applied: break
             case .verificationFailed: findings.append((.problem, "\(name)：验收失败"))

@@ -96,6 +96,34 @@ struct FakeVerifier: AuthorizationVerifier {
         #expect(sbpl.contains("(allow file-read* file-write* (subpath \"/Users/me/easyops\"))"))
     }
 
+    @Test func statusReportsLauncherInstancesWhoseEntryExitedWhileChildrenRun() throws {
+        let s = service()
+        try create(s, F.profile(revision: 1))
+        guard case let .registered(instance, _) = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.launcherCaller, process: cliProcess) else {
+            Issue.record("expected registration"); return
+        }
+        let daemon = ProcessKey(pid: 21, version: 1)
+        s.ingest(.fork(parent: cliProcess, child: daemon))
+        s.ingest(.exit(cliProcess))
+        guard case let .status(report) = s.handle(.status, caller: F.appCaller, process: appProcess) else {
+            Issue.record("expected status"); return
+        }
+        #expect(report.profiles.first?.runningInstances == [instance])
+        #expect(report.profiles.first?.detachedInstances == [instance])
+    }
+
+    @Test func cliRunsAreNotReportedAsDetached() throws {
+        let s = service()
+        try create(s, F.profile(revision: 1))
+        _ = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.cliCaller, process: cliProcess)
+        s.ingest(.fork(parent: cliProcess, child: ProcessKey(pid: 21, version: 1)))
+        s.ingest(.exit(cliProcess))
+        guard case let .status(report) = s.handle(.status, caller: F.appCaller, process: appProcess) else {
+            Issue.record("expected status"); return
+        }
+        #expect(report.profiles.first?.detachedInstances == [])
+    }
+
     @Test func registeringStaleOrUnknownRevisionFails() throws {
         let s = service()
         #expect(s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.launcherCaller, process: cliProcess) == .failure(code: "unknown_profile"))

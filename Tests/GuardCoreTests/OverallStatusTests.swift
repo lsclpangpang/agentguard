@@ -27,6 +27,14 @@ import Testing
         #expect(OverallStatus.evaluate(objects: [object(unmanaged: 1)], collector: healthy, capabilityCheckPassed: true).level == .problem)
     }
 
+    @Test func instanceDetachedFromLaunchdNeedsAttention() {
+        var detached = object()
+        detached.detachedInstances = 1
+        let s = OverallStatus.evaluate(objects: [detached], collector: healthy, capabilityCheckPassed: true)
+        #expect(s.level == .attention)
+        #expect(s.reasons == ["knodo：已脱离 launchd 看护"])
+    }
+
     @Test func capabilityFailureIsAProblem() {
         #expect(OverallStatus.evaluate(objects: [object()], collector: healthy, capabilityCheckPassed: false).level == .problem)
     }
