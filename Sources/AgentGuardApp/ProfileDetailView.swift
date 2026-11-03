@@ -271,12 +271,33 @@ private struct ManagedProgramsCard: View {
     @EnvironmentObject var model: AppModel
     let profile: Profile
     let unmanaged: [Int32]
+    @State private var draft = ""
+
+    private func addDraft() {
+        model.addProgram(path: draft, to: profile.id)
+        draft = ""
+    }
 
     var body: some View {
         Card(title: "受管程序", systemImage: "app.badge.checkmark",
              subtitle: "这个配置档管控的可执行文件，会自动获得读取和执行权限。不经过 AgentGuard 直接运行的副本不受沙箱限制，会在这里报告。") {
-            Button { model.addProgram(to: profile.id) } label: { Label("添加", systemImage: "plus") }
-                .buttonStyle(.borderless)
+            HStack(spacing: 6) {
+                TextField("输入可执行文件路径", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 230)
+                    .onSubmit(addDraft)
+                Button("添加", action: addDraft)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Menu {
+                    Button("选择文件…") { model.addProgram(to: profile.id) }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("从磁盘选择可执行文件")
+            }
         } content: {
             VStack(alignment: .leading, spacing: 10) {
                 if !unmanaged.isEmpty {

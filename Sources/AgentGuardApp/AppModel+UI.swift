@@ -39,6 +39,22 @@ extension AppModel {
         }
     }
 
+    /// 按路径添加受管程序（界面上的输入框用；文件选择框仍保留）。
+    func addProgram(path: String, to id: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDirectory), !isDirectory.boolValue,
+              FileManager.default.isExecutableFile(atPath: expanded) else {
+            lastError = "\(trimmed) 不是可执行文件。脚本请填它实际启动的程序（例如 node、python3）。"
+            return
+        }
+        edit(id) { profile in
+            if !profile.programs.contains(expanded) { profile.programs.append(expanded) }
+        }
+    }
+
     func setTemplate(_ template: Template, enabled: Bool, in id: String) {
         edit(id) { profile in
             profile.templates.removeAll { $0.id == template.id }
