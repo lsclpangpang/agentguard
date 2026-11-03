@@ -54,5 +54,7 @@ jobs:
             ```
             xattr -cr /Applications/AgentGuard.app
             ```
-            打开 App →“安装 Helper”，在“系统设置 > 通用 > 登录项”中允许，并给 /usr/bin/eslogger 授予“完全磁盘访问”。
+            打开 App →“安装 Helper”，在“系统设置 > 通用 > 登录项 > 允许在后台”中允许 AgentGuard。
+            在“完全磁盘访问”中添加 /Applications/AgentGuard.app/Contents/MacOS/agentguard-helper，然后运行
+            `sudo launchctl kickstart -k system/com.lsclpangpang.agentguard.helper`。
             命令行：`/Applications/AgentGuard.app/Contents/MacOS/guard run <配置档> -- <命令>`

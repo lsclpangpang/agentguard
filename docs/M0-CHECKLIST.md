@@ -5,7 +5,7 @@
 ## 构建与签名
 
 - [ ] `swift build` 在 macOS 上通过（Linux 上只编译了非 macOS 分支）。
-- [ ] ad-hoc 签名的 `SMAppService.daemon` 能注册并运行 Helper。
+- [x] ad-hoc 签名的 `SMAppService.daemon` 能注册并运行 Helper。（2026-11-03 真机确认：首次 `register()` 必然返回 `SMAppServiceErrorDomain` code 1，原因是 BTM 处置状态为 disallowed、smd 拒绝 bootstrap；条目已登记，状态变为 requiresApproval，在“登录项 > 允许在后台”允许后 smd 成功启动。另建无关的 ad-hoc 测试 App 复现同样行为，排除签名与 plist 问题。）
 - [ ] Helper 按 `Contents/MacOS` 下各二进制计算的 cdhash，与 App、`guard`、启动器运行时的 cdhash 一致；`setCodeSigningRequirement` 用 `cdhash H"..."` 组合能放行这三者、拒绝其他程序。
 - [ ] 通过 KVC 读取 `NSXPCConnection` 的 `auditToken` 可用，`val.5`/`val.7` 分别是 pid/pidversion。
 
@@ -27,7 +27,7 @@
 ## 采集
 
 - [ ] `eslogger --format json` 的字段名与 `ESLoggerParserTests` 中的样例一致（`global_seq_num`、`process.audit_token.pid/pidversion`、`event.fork.child`、`event.exec.target`、`open.fflag` 等）；用真实输出替换测试样例。
-- [ ] 由 launchd 启动时，“完全磁盘访问”需要授予 `/usr/bin/eslogger`。
+- [x] 由 Helper 启动 eslogger 时，“完全磁盘访问”要授予谁。（2026-11-03 真机确认：TCC 日志 `AUTHREQ_ATTRIBUTION: responsible={com.lsclpangpang.agentguard.helper} requesting={com.apple.eslogger}`，授权对象是 `agentguard-helper`，只给 `/usr/bin/eslogger` 授权无效。）
 - [ ] 全系统 fork/exec/exit 事件的 CPU 与内存开销；开启文件事件（学习模式）时的开销。
 - [ ] 沙箱拒绝日志的实际格式与 `SandboxLogParserTests` 一致，`log stream` 谓词能收到。
 
