@@ -199,21 +199,8 @@ private struct FileRow: View {
                 .layoutPriority(1)
             HStack(spacing: 6) {
                 if grant.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
-                // 直接在这里切换读写级别：单独的授权项常常先按只读加进来，
-                // 用起来才发现要写，没必要删掉重加一遍。
-                Menu {
-                    Button("只读") { setAccess(.readOnly) }
-                        .disabled(grant.access == .readOnly)
-                    Button("读写") { setAccess(.readWrite) }
-                        .disabled(grant.access == .readWrite)
-                } label: {
-                    Chip(text: grant.access == .readWrite ? "读写" : "只读",
-                         tint: grant.access == .readWrite ? .orange : .blue)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("切换为只读或读写")
+                // 直接在这里切换读写级别：授权项常常先按只读加进来，用起来才发现要写。
+                AccessControl(access: grant.access, change: setAccess)
             }
             .fixedSize()
             Button(role: .destructive, action: remove) { Image(systemName: "trash") }

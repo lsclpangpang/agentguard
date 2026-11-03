@@ -179,3 +179,49 @@ struct ConfirmationSheet: View {
     }
 }
 #endif
+
+/// 单条文件授权的读写级别。做成两段式胶囊而不是菜单：`Menu` 的 label 会被 AppKit 换掉，
+/// 自定义底色和前景色都留不住，看起来就是两行裸文字；两段式还能一眼看出“可切换”。
+struct AccessControl: View {
+    let access: Access
+    let change: (Access) -> Void
+    @State private var hover: Access?
+
+    private func tint(_ value: Access) -> Color { value == .readWrite ? .orange : .blue }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            segment(.readOnly, label: "只读", icon: "lock.fill")
+            segment(.readWrite, label: "读写", icon: "lock.open.fill")
+        }
+        .padding(2)
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+        .fixedSize()
+        .help(access == .readWrite ? "点击「只读」收回写权限" : "点击「读写」允许写入")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("访问级别")
+    }
+
+    private func segment(_ value: Access, label: String, icon: String) -> some View {
+        let active = access == value
+        return Button {
+            guard !active else { return }
+            change(value)
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: icon).imageScale(.small)
+                Text(label)
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(active ? tint(value) : Color.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(active ? tint(value).opacity(0.16)
+                                              : (hover == value ? Color.primary.opacity(0.06) : .clear)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 ? value : nil }
+    }
+}
