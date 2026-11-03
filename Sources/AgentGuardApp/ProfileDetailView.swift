@@ -330,7 +330,7 @@ private struct DeleteCard: View {
 
     var body: some View {
         Card(title: "删除配置档", systemImage: "trash",
-             subtitle: "删除全部权限设置和 AgentGuard 安装的启动项，名称可以重新使用；已批准的历史修订会归档保留。") {
+             subtitle: "删除全部权限设置和 AgentGuard 安装的启动项，名称可以重新使用。已批准的历史修订和它的状态目录会归档到只有 root 能访问的位置。") {
             HStack(spacing: 12) {
                 if profile.launch?.originalLabel != nil {
                     Button("删除并恢复原启动项…", role: .destructive) { model.deleteProfile(profile.id, restoreOriginal: true) }

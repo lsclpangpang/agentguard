@@ -267,7 +267,9 @@ final class AppModel: ObservableObject {
             guard await askConfirmation("删除配置档 \(id)", lines) else { return }
             Task.detached {
                 do {
-                    let token = try UserAuthorization.obtain(scope: HelperService.authorizationScope(forDeletion: id), prompt: "AgentGuard 将删除配置档 \(id)")
+                    let restores = restoreOriginal && self.profile(id)?.launch?.originalLabel != nil
+                    let prompt = "AgentGuard 将删除配置档 \(id)" + (restores ? "，并恢复原启动项（之后将无限制运行）" : "")
+                    let token = try UserAuthorization.obtain(scope: HelperService.authorizationScope(forDeletion: id, restoreOriginal: restores), prompt: prompt)
                     await self.sendAsync(.deleteProfile(profileID: id, restoreOriginal: restoreOriginal, authorization: token))
                 } catch {
                     await MainActor.run { self.lastError = "\(error)" }

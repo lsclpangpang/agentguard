@@ -206,7 +206,7 @@ public final class HelperService {
     }
 
     public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool) {
-        tracker.register(instance: id, profileID: profileID, revision: revision, root: root, supervisedByLaunchd: supervisedByLaunchd)
+        tracker.register(instance: id, profileID: profileID, revision: revision, root: root, supervisedByLaunchd: supervisedByLaunchd, restored: true)
     }
 
     public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {
@@ -349,7 +349,10 @@ public final class HelperService {
         let base = latest?.revision ?? 0
         guard profile.revision == base + 1 else { throw Failure(code: "revision_conflict") }
         let empty = Profile(id: profile.id, revision: 0, mode: .enforce, templates: [], files: [], exec: [], network: NetworkPolicy())
-        return (try compiler.compile(latest ?? empty, catalog: catalog), base)
+        // A stored revision that no longer compiles (stricter rules arrived later) must stay repairable.
+        // Comparing against the empty policy makes every grant of the repair need authorization.
+        let current = try (try? compiler.compile(latest ?? empty, catalog: catalog)) ?? compiler.compile(empty, catalog: catalog)
+        return (current, base)
     }
 
     private func propose(_ profile: Profile, caller: CallerIdentity) throws -> HelperResponse {
@@ -393,7 +396,11 @@ public final class HelperService {
 
     public static func authorizationScope(forChange changeID: String) -> String { "change." + changeID }
     public static func authorizationScope(forRemoval profileID: String) -> String { "remove." + profileID }
-    public static func authorizationScope(forDeletion profileID: String) -> String { "delete." + profileID }
+    /// Restoring the original item makes it run unprotected, so it gets its own scope: authorization for a
+    /// plain delete must not also cover a restore.
+    public static func authorizationScope(forDeletion profileID: String, restoreOriginal: Bool = false) -> String {
+        (restoreOriginal ? "delete.restore." : "delete.") + profileID
+    }
 
     /// Archives the profile. A running instance keeps the sandbox it started with, but nothing could
     /// restart it or show its state any more, so it has to be stopped first.
@@ -402,7 +409,7 @@ public final class HelperService {
         guard !tracker.instances(ofProfile: profileID).contains(where: \.isRunning) else { throw Failure(code: "profile_running") }
         let restoreLabel = restoreOriginal ? latest.launch?.originalLabel : nil
         let summary = ["删除配置档 \(profileID)"] + (restoreLabel.map { ["恢复原启动项 \($0)（将无限制运行）"] } ?? [])
-        guard verifier.verify(token: token, scope: Self.authorizationScope(forDeletion: profileID), summary: summary) else {
+        guard verifier.verify(token: token, scope: Self.authorizationScope(forDeletion: profileID, restoreOriginal: restoreLabel != nil), summary: summary) else {
             throw ApprovalError.authorizationMissing
         }
         try store.archive(profileID, stamp: String(Int(clock().timeIntervalSince1970)))
@@ -468,7 +475,8 @@ public final class HelperService {
                 mode: latest.mode,
                 revisionState: RevisionState.evaluate(savedRevision: latest.revision, instances: instances, verified: verified),
                 runningInstances: instances.filter(\.isRunning).map(\.id),
-                pendingCount: try pendingItems(for: latest).count,
+                // One profile that no longer compiles must not hide the status of all the others.
+                pendingCount: (try? pendingItems(for: latest).count) ?? 0,
                 detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id),
                 unmanagedProcesses: unmanaged[id]?.map(\.pid) ?? []
             )

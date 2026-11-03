@@ -52,10 +52,10 @@ import Testing
 
     // MARK: Unmanaged detection
 
-    @Test func childrenOfAManagedProcessAreManagedEvenWhenLineageWasNotObserved() {
+    @Test func childrenOfARestoredRootAreManagedEvenWhenLineageWasNotObserved() {
         // After a Helper restart only the instance's root is restored; its children were never seen forking.
         var tracker = InstanceTracker()
-        tracker.register(instance: 1, profileID: "knodo", revision: 1, root: ProcessKey(pid: 100, version: 77))
+        tracker.register(instance: 1, profileID: "knodo", revision: 1, root: ProcessKey(pid: 100, version: 77), restored: true)
         let running = [
             RunningProcess(key: ProcessKey(pid: 100, version: 0), executablePath: "/bin/sh", parentPID: 1),
             RunningProcess(key: ProcessKey(pid: 101, version: 0), executablePath: "/opt/knodo/knodo-agentd", parentPID: 100),
@@ -160,5 +160,56 @@ import Testing
         #expect(!LaunchAgentDefinition.isManagedLabel("com.example.agentguard.managed.knodo-work", profileID: "knodo", labelPrefix: prefix))
         #expect(!LaunchAgentDefinition.isManagedLabel("com.example.agentguard.managed.knodo-work.1a2b3c4d", profileID: "knodo", labelPrefix: prefix))
         #expect(!LaunchAgentDefinition.isManagedLabel("com.knodo.restricted-agent", profileID: "knodo", labelPrefix: prefix))
+    }
+
+    @Test func onlyRestoredRootsVouchForUnobservedDescendants() {
+        // A stale owner entry whose PID was reused by a terminal must not hide everything started from it.
+        var tracker = InstanceTracker()
+        tracker.register(instance: 1, profileID: "knodo", revision: 1, root: ProcessKey(pid: 500, version: 3))
+        let running = [
+            RunningProcess(key: ProcessKey(pid: 500, version: 0), executablePath: "/bin/zsh", parentPID: 1),
+            RunningProcess(key: ProcessKey(pid: 501, version: 0), executablePath: "/opt/tool", parentPID: 500),
+        ]
+        let found = UnmanagedDetector.detect(running: running, tracker: tracker, targets: ["t": ["/opt/tool"]],
+                                             resolver: AliasResolver.macOSDefault, caseInsensitive: true)
+        #expect(found == ["t": [ProcessKey(pid: 501, version: 0)]])
+    }
+
+    // MARK: Profiles that no longer compile
+
+    func storeWithUncompilableProfile() throws -> ProfileStore {
+        let files = InMemoryFileStore()
+        let store = ProfileStore(root: "/store", files: files)
+        var broken = F.profile()
+        broken.launch = launch(label: "bad label")
+        try files.writeAtomically(try ProfileCodec.encode(broken), to: "/store/profiles/knodo/1.json")
+        var other = F.profile()
+        other.id = "other"
+        try files.writeAtomically(try ProfileCodec.encode(other), to: "/store/profiles/other/1.json")
+        return store
+    }
+
+    @Test func oneUncompilableProfileDoesNotHideTheStatusOfTheOthers() throws {
+        let s = service(try storeWithUncompilableProfile())
+        guard case let .status(report) = s.handle(.status, caller: F.appCaller, process: appProcess) else {
+            Issue.record("expected status"); return
+        }
+        #expect(report.profiles.map(\.profileID) == ["knodo", "other"])
+    }
+
+    @Test func anUncompilableProfileCanBeRepairedWithAuthorization() throws {
+        let s = service(try storeWithUncompilableProfile())
+        var fixed = F.profile(revision: 2)
+        fixed.launch = launch(label: "com.knodo.restricted-agent")
+        guard case let .pending(info) = s.handle(.proposeChange(profile: fixed), caller: F.appCaller, process: appProcess) else {
+            Issue.record("expected a proposal"); return
+        }
+        // Compared against an empty policy, so everything the repaired revision grants needs authorization.
+        #expect(info.requiresAuthorization)
+    }
+
+    @Test func deletingWithRestoreUsesItsOwnAuthorizationScope() {
+        #expect(HelperService.authorizationScope(forDeletion: "knodo", restoreOriginal: true) == "delete.restore.knodo")
+        #expect(HelperService.authorizationScope(forDeletion: "knodo", restoreOriginal: false) == "delete.knodo")
     }
 }

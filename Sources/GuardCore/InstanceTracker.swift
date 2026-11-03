@@ -31,6 +31,8 @@ public struct InstanceSnapshot: Equatable, Sendable {
     public var supervisedByLaunchd: Bool
     /// The process launchd started, following its execs; nil once it has exited.
     public var entry: ProcessKey?
+    /// Put back after a Helper restart from the recorded root alone; its descendants were never observed.
+    public var restored: Bool = false
 
     public init(id: Int, profileID: String, revision: Int, liveProcesses: Set<ProcessKey>, lifecycleConfirmed: Bool,
                 supervisedByLaunchd: Bool = false, entry: ProcessKey? = nil) {
@@ -57,9 +59,11 @@ public struct InstanceTracker: Sendable {
 
     public init() {}
 
-    public mutating func register(instance id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool = false) {
+    public mutating func register(instance id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool = false,
+                                  restored: Bool = false) {
         instances[id] = InstanceSnapshot(id: id, profileID: profileID, revision: revision, liveProcesses: [root], lifecycleConfirmed: true,
                                          supervisedByLaunchd: supervisedByLaunchd, entry: root)
+        instances[id]?.restored = restored
         owners[root] = id
     }
 
@@ -98,6 +102,11 @@ public struct InstanceTracker: Sendable {
     }
 
     public func snapshot(of id: Int) -> InstanceSnapshot? { instances[id] }
+
+    /// PIDs of live roots of restored instances: the only processes whose unobserved descendants count as theirs.
+    public var restoredRootPIDs: Set<Int32> {
+        Set(instances.values.filter(\.restored).compactMap(\.entry).filter { owners[$0] != nil }.map(\.pid))
+    }
 
     /// Forgets every instance of a deleted profile; returns their IDs.
     public mutating func removeInstances(ofProfile profileID: String) -> [Int] {
