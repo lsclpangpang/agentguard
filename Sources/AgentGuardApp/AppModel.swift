@@ -257,6 +257,8 @@ final class AppModel: ObservableObject {
 
     func deleteProfile(_ id: String, restoreOriginal: Bool = false) {
         var lines = ["删除配置档 \(id) 及其全部权限设置；已批准的历史修订会归档保留", "之后 guard run \(id) 将无法启动"]
+        // 在进 detached 任务之前先取好：profile(_:) 是 MainActor 隔离的，detached 里不能直接调。
+        let originalLabel = profile(id)?.launch?.originalLabel
         if let launch = profile(id)?.launch {
             lines.append("移除 AgentGuard 为它安装的启动项")
             if let original = launch.originalLabel {
@@ -267,7 +269,7 @@ final class AppModel: ObservableObject {
             guard await askConfirmation("删除配置档 \(id)", lines) else { return }
             Task.detached {
                 do {
-                    let restores = restoreOriginal && self.profile(id)?.launch?.originalLabel != nil
+                    let restores = restoreOriginal && originalLabel != nil
                     let prompt = "AgentGuard 将删除配置档 \(id)" + (restores ? "，并恢复原启动项（之后将无限制运行）" : "")
                     let token = try UserAuthorization.obtain(scope: HelperService.authorizationScope(forDeletion: id, restoreOriginal: restores), prompt: prompt)
                     await self.sendAsync(.deleteProfile(profileID: id, restoreOriginal: restoreOriginal, authorization: token))
