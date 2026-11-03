@@ -110,6 +110,7 @@ final class Collector {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         let read = recv(socketFD, &buffer, buffer.count, 0)
         guard read > 0 else {
+            log.error("recv 返回 \(read) errno=\(errno)，断开重连")
             disconnect()
             return
         }
@@ -155,6 +156,7 @@ final class Collector {
         pending.removeAll()
         lock.unlock()
         source?.cancel()
+        log.notice("与采集器断开")
         record(.exited)
         scheduleReconnect()
     }

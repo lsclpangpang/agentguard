@@ -11,6 +11,9 @@ import GuardCore
 /// frequently re-signed app. It publishes newline-delimited `CollectorWire` envelopes on a
 /// root-only UNIX socket; the Helper consumes them.
 
+// 客户端随时可能断开；写一个已经关闭的 socket 会触发 SIGPIPE，默认动作是杀掉进程。
+signal(SIGPIPE, SIG_IGN)
+
 let socketPath = AgentGuardConfig.collectorSocketPath
 let esloggerPath = "/usr/bin/eslogger"
 let logPath = "/usr/bin/log"
@@ -167,6 +170,9 @@ DispatchQueue.global().async {
             if errno == EINTR { continue }
             break
         }
+        // 双保险：即使某次写失败，也不要让内核发 SIGPIPE。
+        var on: Int32 = 1
+        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         subscribers.add(client)
     }
 }
