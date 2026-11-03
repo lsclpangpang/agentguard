@@ -38,14 +38,16 @@ final class HelperCore {
         return identities
     }
 
-    /// Re-pins the bundled binaries whenever a connection arrives.
+    /// Re-pins the bundled binaries whenever a connection arrives. Must run on `queue`:
+    /// requests read `identities` and the service's trust policy there.
     ///
     /// 每次都同步给 HelperService，而不是只在 cdhash 变化时同步：这个 daemon 会连续运行几天，
     /// 期间 App 可能被重编十几次；只要有一轮信任表没跟上，合法调用者就会被判成 not_trusted
     /// （现象是界面一切正常、只有改权限时静默失败）。`true` 表示 cdhash 确实变了。
     @discardableResult
     func refreshIdentitiesIfChanged() -> Bool {
-        let fresh = Self.readIdentities(bundleMacOSDirectory: bundleMacOSDirectory)
+        dispatchPrecondition(condition: .onQueue(queue))
+        let fresh = CallerTrustPolicy.refreshed(identities, with: Self.readIdentities(bundleMacOSDirectory: bundleMacOSDirectory))
         let changed = fresh != identities
         identities = fresh
         service?.updateIdentities(fresh)
