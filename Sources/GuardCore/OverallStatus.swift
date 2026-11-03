@@ -53,6 +53,11 @@ public struct OverallStatus: Equatable, Sendable {
     public let level: StatusLevel
     public let reasons: [String]
 
+    public init(level: StatusLevel, reasons: [String]) {
+        self.level = level
+        self.reasons = reasons
+    }
+
     public static let allGood = OverallStatus(level: .allGood, reasons: [])
 
     public static func evaluate(objects: [ObjectStatus], collector: CollectorHealth, capabilityCheckPassed: Bool) -> OverallStatus {

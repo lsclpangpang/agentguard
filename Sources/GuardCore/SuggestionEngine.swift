@@ -35,6 +35,13 @@ public struct PendingItem: Hashable, Sendable, Codable {
     public var sensitive: Bool
     public var evidence: Int
     public var samples: [String]
+
+    public init(suggestion: Suggestion, sensitive: Bool, evidence: Int, samples: [String]) {
+        self.suggestion = suggestion
+        self.sensitive = sensitive
+        self.evidence = evidence
+        self.samples = samples
+    }
 }
 
 /// Turns observed accesses that the current policy does not cover into reviewable pending items.
