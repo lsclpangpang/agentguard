@@ -45,6 +45,8 @@ struct MainWindow: View {
         .onDisappear { MainWindowBehavior.windowClosed() }
         .onChange(of: selection) { _, value in storedSelection = value ?? "" }
         .onChange(of: model.report?.profiles.map(\.profileID) ?? []) { _, ids in
+            // 列表暂时为空（查询失败/正在刷新）时保持当前选择，别把详情页拆掉重建。
+            guard !ids.isEmpty else { return }
             if selection == nil || !(ids.contains(selection ?? "")) { selection = ids.first }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refresh() }

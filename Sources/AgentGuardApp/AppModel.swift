@@ -70,7 +70,9 @@ final class AppModel: ObservableObject {
                     self.helperReachable = true
                     self.installNotice = nil
                 } else {
-                    self.report = nil
+                    // 不要在这里清空 report：一次查询失败就把配置档列表变空，界面会退回
+                    // “选择一个配置档”，再恢复时详情页整棵重建、滚动位置归零——看起来就是
+                    // 莫名跳回顶部。保留上次的报告，只用可达性表达当前状态。
                     self.helperReachable = false
                     self.repairStaleRegistrationIfNeeded()
                 }
