@@ -1,0 +1,323 @@
+#if os(macOS)
+import GuardCore
+import SwiftUI
+
+struct ProfileDetailView: View {
+    @EnvironmentObject var model: AppModel
+    let profileID: String
+
+    var body: some View {
+        if let profile = model.profile(profileID) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ProfileHeader(profile: profile, status: model.status(for: profileID))
+                    PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
+                    FilesCard(profile: profile)
+                    TemplatesCard(profile: profile)
+                    ProgramsAndNetworkCard(profile: profile)
+                    if profile.launch != nil { LaunchCard(profile: profile) }
+                }
+                .padding(20)
+                .frame(maxWidth: 860, alignment: .leading)
+                .frame(maxWidth: .infinity)
+            }
+            .navigationTitle(profileID)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Picker("模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
+                        Label(Mode.restrictedLearning.displayName, systemImage: Mode.restrictedLearning.symbol).tag(Mode.restrictedLearning)
+                        Label(Mode.enforce.displayName, systemImage: Mode.enforce.symbol).tag(Mode.enforce)
+                    }
+                    .pickerStyle(.segmented)
+                    .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
+                }
+            }
+        }
+    }
+}
+
+private struct ProfileHeader: View {
+    let profile: Profile
+    let status: ProfileStatusReport?
+    @State private var copied = false
+
+    private var command: String { "guard run \(profile.id) -- <命令>" }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            IconTile(systemImage: profile.mode.symbol, tint: profile.mode.tint, size: 52)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(profile.id).font(.largeTitle.weight(.semibold))
+                HStack(spacing: 6) {
+                    Chip(text: profile.mode.displayName, systemImage: profile.mode.symbol, tint: profile.mode.tint)
+                    if let status {
+                        Chip(text: status.revisionState.displayText, tint: status.revisionState.tint)
+                        Chip(text: "修订 \(status.savedRevision)")
+                        if !status.runningInstances.isEmpty {
+                            Chip(text: "\(status.runningInstances.count) 个运行实例", systemImage: "bolt.fill", tint: .green)
+                        }
+                    }
+                }
+                Text(profile.mode.explanation).font(.callout).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text(command).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    Button {
+                        Pasteboard.copy("guard run \(profile.id) -- ")
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("复制启动命令")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+            }
+            Spacer()
+        }
+        .padding(.bottom, 4)
+    }
+}
+
+private struct PendingCard: View {
+    @EnvironmentObject var model: AppModel
+    let profileID: String
+    let items: [PendingItem]
+
+    var body: some View {
+        if !items.isEmpty {
+            let ordinary = items.filter { !$0.sensitive }
+            Card(title: "待定项", systemImage: "tray.full.fill",
+                 subtitle: "受管程序尝试过、但当前未允许的访问。这里只列出已观测到的行为，不代表全部。") {
+                if ordinary.count > 1 {
+                    Button("允许全部非敏感项（\(ordinary.count)）") { model.acceptAll(ordinary, for: profileID) }
+                        .controlSize(.small)
+                }
+            } content: {
+                VStack(spacing: 2) {
+                    ForEach(items, id: \.self) { item in
+                        HStack(spacing: 10) {
+                            IconTile(systemImage: item.suggestion.symbol, tint: item.sensitive ? .red : .accentColor)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.suggestion.title).lineLimit(2).truncationMode(.middle)
+                                HStack(spacing: 6) {
+                                    Text("\(item.evidence) 次").font(.caption).foregroundStyle(.secondary)
+                                    if item.sensitive { Chip(text: "敏感位置", systemImage: "exclamationmark.triangle.fill", tint: .red) }
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            Button("允许") { model.acceptAll([item], for: profileID) }
+                                .controlSize(.small)
+                        }
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 8)
+                        .help(item.samples.joined(separator: "\n"))
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct FilesCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+
+    var body: some View {
+        Card(title: "文件访问", systemImage: "folder.fill",
+             subtitle: "沙箱只放行这里列出的目录和文件；系统库由“系统基础”模板提供。") {
+            Menu {
+                Button("只读…") { model.addFolder(to: profile.id, access: .readOnly) }
+                Button("读写…") { model.addFolder(to: profile.id, access: .readWrite) }
+            } label: {
+                Label("添加", systemImage: "plus")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        } content: {
+            if profile.files.isEmpty {
+                Text("还没有手动添加的目录").font(.callout).foregroundStyle(.secondary).padding(.vertical, 4)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(profile.files.enumerated()), id: \.offset) { index, grant in
+                        if index > 0 { Divider().padding(.leading, 46) }
+                        HoverRow {
+                            IconTile(systemImage: grant.kind == .directory ? "folder.fill" : "doc.fill",
+                                     tint: grant.access == .readWrite ? .orange : .blue)
+                            PathLabel(path: grant.path)
+                        } trailing: {
+                            Button(role: .destructive) { model.removeFile(grant, from: profile.id) } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("移除")
+                        }
+                        .overlay(alignment: .trailing) {
+                            HStack(spacing: 6) {
+                                if grant.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
+                                Chip(text: grant.access == .readWrite ? "读写" : "只读", tint: grant.access == .readWrite ? .orange : .blue)
+                            }
+                            .padding(.trailing, 40)
+                            .allowsHitTesting(false)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct TemplatesCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+
+    var body: some View {
+        Card(title: "运行时模板", systemImage: "square.stack.3d.up.fill",
+             subtitle: "常见工具运行所需的一组权限，可整体开关。") {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                ForEach(model.templates, id: \.id) { template in
+                    TemplateTile(template: template, enabled: profile.templates.contains { $0.id == template.id }) { enabled in
+                        model.setTemplate(template, enabled: enabled, in: profile.id)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct TemplateTile: View {
+    let template: Template
+    let enabled: Bool
+    let toggle: (Bool) -> Void
+
+    var body: some View {
+        let info = TemplateInfo.of(template.id)
+        Button { toggle(!enabled) } label: {
+            HStack(alignment: .top, spacing: 10) {
+                IconTile(systemImage: info.symbol, tint: enabled ? .accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(info.title).font(.body.weight(.medium)).foregroundStyle(.primary)
+                    Text(info.detail).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: enabled ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(enabled ? Color.accentColor : Color.secondary)
+                    .font(.title3)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(enabled ? Color.accentColor.opacity(0.08) : Color.primary.opacity(0.03)))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(enabled ? Color.accentColor.opacity(0.5) : Color.primary.opacity(0.08)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ProgramsAndNetworkCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+    @State private var newPort = ""
+
+    var body: some View {
+        Card(title: "程序与网络", systemImage: "network",
+             subtitle: "允许执行的程序和可连接的本机端口。允许某个端口不代表授权该服务替它做的事。") {
+            VStack(alignment: .leading, spacing: 14) {
+                if profile.unrestrictedExec {
+                    Notice(kind: .warning, text: "允许执行任意程序（从现有安装迁移时保留）。")
+                }
+                if !profile.exec.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("可执行程序").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                        ForEach(profile.exec, id: \.path) { grant in
+                            HStack(spacing: 8) {
+                                Image(systemName: "play.square").foregroundStyle(.secondary)
+                                Text(PathLabel.abbreviate(grant.path)).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                                if grant.sha256 != nil { Chip(text: "限定哈希", systemImage: "number") }
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("本机 TCP 端口").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        ForEach(profile.network.loopbackTCPConnect, id: \.self) { port in
+                            HStack(spacing: 4) {
+                                Text("\(port)").font(.system(.callout, design: .monospaced))
+                                Button {
+                                    model.edit(profile.id) { $0.network.loopbackTCPConnect.removeAll { $0 == port } }
+                                } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                        }
+                        TextField("端口", text: $newPort)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                            .onSubmit(addPort)
+                        Button("添加", action: addPort).disabled(Int(newPort).map { !(1...65535).contains($0) } ?? true)
+                    }
+                }
+
+                Divider()
+
+                Toggle(isOn: Binding(
+                    get: { profile.network.outboundTCP == .allowed },
+                    set: { allowed in model.edit(profile.id) { $0.network.outboundTCP = allowed ? .allowed : .denied } })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("允许对外 TCP 连接")
+                        Text("Agent 连接模型服务通常需要打开").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+            }
+        }
+    }
+
+    private func addPort() {
+        guard let port = Int(newPort), (1...65535).contains(port) else { return }
+        model.edit(profile.id) { $0.network.loopbackTCPConnect.append(port) }
+        newPort = ""
+    }
+}
+
+private struct LaunchCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+
+    var body: some View {
+        if let launch = profile.launch {
+            Card(title: "启动项", systemImage: "power",
+                 subtitle: "接管后由 AgentGuard 启动器在沙箱内启动，登录自启和异常重启都经过同一入口。") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(([PathLabel.abbreviate(launch.executable)] + launch.arguments).joined(separator: " "))
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+                    if let original = launch.originalLabel {
+                        Label("原启动项：\(original)", systemImage: "arrow.uturn.backward").font(.callout).foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Button("接管启动项") { model.installLaunchAgent(profile.id) }
+                            .buttonStyle(.borderedProminent)
+                        Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
+                        Spacer()
+                        Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
+                    }
+                }
+            }
+        }
+    }
+}
+#endif
