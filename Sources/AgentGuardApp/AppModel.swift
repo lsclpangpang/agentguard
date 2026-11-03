@@ -175,7 +175,8 @@ final class AppModel: ObservableObject {
 
     /// Proposes `profile` as the next revision, shows the exact diff, and asks for system
     /// authentication when the change widens permissions.
-    func submit(_ profile: Profile) {
+    /// `unchangedHint` replaces the bare "没有变化" when the caller knows why an edit may compile to the same policy.
+    func submit(_ profile: Profile, unchangedHint: String? = nil) {
         Task.detached {
             let logger = Logger(subsystem: "com.lsclpangpang.agentguard", category: "ui")
             do {
@@ -186,7 +187,7 @@ final class AppModel: ObservableObject {
                 guard case let .pending(info) = proposal else { throw Self.failure(proposal) }
                 if info.summary.isEmpty {
                     logger.debug("submit: 差异为空，标记没有变化")
-                    await MainActor.run { self.lastError = "没有变化" }
+                    await MainActor.run { self.lastError = unchangedHint ?? "没有变化" }
                     return
                 }
                 let confirmed = await self.askConfirmation("确认权限变更：\(profile.id)", info.summary)
@@ -207,11 +208,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func edit(_ id: String, _ change: (inout Profile) -> Void) {
+    func edit(_ id: String, unchangedHint: String? = nil, _ change: (inout Profile) -> Void) {
         guard var profile = profile(id) else { return }
         change(&profile)
         profile.revision += 1
-        submit(profile)
+        submit(profile, unchangedHint: unchangedHint)
     }
 
     /// `program` is what the profile manages; `launch` is set only when it should run as a background item.
