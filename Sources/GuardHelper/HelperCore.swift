@@ -197,6 +197,16 @@ final class HelperCore {
         let learning = ((try? config.store.profileIDs()) ?? []).contains { id in
             (try? config.store.latest(id))?.mode != .enforce
         }
+        // 文件事件占采集流量的九成以上（实测 open+close ≈ 95%），只有学习模式需要它。
+        // 用标记文件通知采集器，免得为了切订阅把守护进程整条重启。
+        let flag = AgentGuardConfig.collectorFileEventsFlagPath
+        if learning {
+            if !FileManager.default.fileExists(atPath: flag) {
+                FileManager.default.createFile(atPath: flag, contents: Data())
+            }
+        } else {
+            try? FileManager.default.removeItem(atPath: flag)
+        }
         collector.start(fileEvents: learning)
     }
 }
