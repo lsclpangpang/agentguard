@@ -231,8 +231,16 @@ final class AppModel: ObservableObject {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
+        panel.treatsFilePackagesAsDirectories = true
         panel.message = "选择要管控的可执行文件。按 ⌘⇧G 可以输入路径，例如 /opt/homebrew/bin/claude"
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue,
+              FileManager.default.isExecutableFile(atPath: url.path)
+        else {
+            lastError = "\(url.path) 不是可执行文件。App 请选它包里 Contents/MacOS 下的程序。"
+            return nil
+        }
         return url.path
     }
 
@@ -247,12 +255,12 @@ final class AppModel: ObservableObject {
         edit(id) { profile in profile.programs.removeAll { $0 == path } }
     }
 
-    func deleteProfile(_ id: String) {
+    func deleteProfile(_ id: String, restoreOriginal: Bool = false) {
         var lines = ["删除配置档 \(id) 及其全部权限设置；已批准的历史修订会归档保留", "之后 guard run \(id) 将无法启动"]
         if let launch = profile(id)?.launch {
             lines.append("移除 AgentGuard 为它安装的启动项")
             if let original = launch.originalLabel {
-                lines.append("不会恢复原启动项 \(original)；需要恢复请先在“启动项”里点“恢复原启动项”")
+                lines.append(restoreOriginal ? "恢复原启动项 \(original)：之后将无限制运行" : "不恢复原启动项 \(original)")
             }
         }
         Task {
@@ -260,7 +268,7 @@ final class AppModel: ObservableObject {
             Task.detached {
                 do {
                     let token = try UserAuthorization.obtain(scope: HelperService.authorizationScope(forDeletion: id), prompt: "AgentGuard 将删除配置档 \(id)")
-                    await self.sendAsync(.deleteProfile(profileID: id, authorization: token))
+                    await self.sendAsync(.deleteProfile(profileID: id, restoreOriginal: restoreOriginal, authorization: token))
                 } catch {
                     await MainActor.run { self.lastError = "\(error)" }
                 }

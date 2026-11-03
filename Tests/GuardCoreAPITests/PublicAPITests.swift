@@ -38,8 +38,8 @@ import Testing
                               launch: launch, programs: ["/opt/tool"])
         profile.programs.removeAll { $0 == "/opt/tool" }
         #expect(profile.programs.isEmpty)
-        let request = HelperRequest.deleteProfile(profileID: "tool", authorization: nil)
-        #expect(request == .deleteProfile(profileID: "tool", authorization: nil))
+        let request = HelperRequest.deleteProfile(profileID: "tool", restoreOriginal: false, authorization: nil)
+        #expect(request == .deleteProfile(profileID: "tool", restoreOriginal: false, authorization: nil))
         #expect(HelperService.authorizationScope(forDeletion: "tool") == "delete.tool")
         #expect(HelperFailure.message(for: "profile_running").contains("运行"))
     }

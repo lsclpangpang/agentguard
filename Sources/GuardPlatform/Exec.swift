@@ -113,7 +113,10 @@ public enum ProcessFacts {
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         return pids.prefix(Int(count)).compactMap { pid in
             guard pid > 0, proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-            return RunningProcess(key: ProcessKey(pid: pid, version: 0), executablePath: String(cString: buffer))
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            let parent = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size ? Int32(bitPattern: info.pbi_ppid) : nil
+            return RunningProcess(key: ProcessKey(pid: pid, version: 0), executablePath: String(cString: buffer), parentPID: parent)
         }
         #else
         return []

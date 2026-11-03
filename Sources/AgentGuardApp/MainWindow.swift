@@ -57,6 +57,10 @@ struct MainWindow: View {
                     SidebarRow(profile: profile)
                         .tag(profile.profileID)
                         .contextMenu {
+                            if model.profile(profile.profileID)?.launch?.originalLabel != nil {
+                                Button("删除并恢复原启动项…", role: .destructive) { model.deleteProfile(profile.profileID, restoreOriginal: true) }
+                                    .disabled(!profile.runningInstances.isEmpty)
+                            }
                             Button("删除配置档…", role: .destructive) { model.deleteProfile(profile.profileID) }
                                 .disabled(!profile.runningInstances.isEmpty)
                         }

@@ -36,7 +36,8 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case removeManagement(profileID: String, restoreOriginal: Bool, authorization: Data?)
     /// 重启受管实例：改完规则后旧进程还按老沙箱在跑，必须重启才会装载新规则。
     case restartManagedInstance(profileID: String)
-    case deleteProfile(profileID: String, authorization: Data?)
+    /// `restoreOriginal` puts back the launch item a takeover replaced; it then runs unprotected.
+    case deleteProfile(profileID: String, restoreOriginal: Bool, authorization: Data?)
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -122,8 +123,9 @@ public enum HelperResponse: Codable, Equatable, Sendable {
     case pendingItems([PendingItem])
     /// 平台层先结束 `pids` 里的进程，再用 `plist` 重新注册 `label`。
     case restartManaged(label: String, originalLabel: String?, plist: Data, pids: [Int32])
-    /// The profile was archived; the platform layer removes its managed LaunchAgents and state.
-    case deleted(profileID: String)
+    /// The profile was archived; the platform layer removes its managed LaunchAgents, archives its state
+    /// directory and, when `restoreOriginalLabel` is set, restores that original launch item.
+    case deleted(profileID: String, restoreOriginalLabel: String?)
     case ok
     case failure(code: String)
 }
@@ -311,9 +313,9 @@ public final class HelperService {
             case let .restartManagedInstance(profileID):
                 try require(role, in: [.app])
                 return try restartManaged(profileID)
-            case let .deleteProfile(profileID, authorization):
+            case let .deleteProfile(profileID, restoreOriginal, authorization):
                 try require(role, in: [.app])
-                return try deleteProfile(profileID, token: authorization)
+                return try deleteProfile(profileID, restoreOriginal: restoreOriginal, token: authorization)
             }
         } catch let failure as Failure {
             return .failure(code: failure.code)
@@ -395,17 +397,20 @@ public final class HelperService {
 
     /// Archives the profile. A running instance keeps the sandbox it started with, but nothing could
     /// restart it or show its state any more, so it has to be stopped first.
-    private func deleteProfile(_ profileID: String, token: Data?) throws -> HelperResponse {
-        guard try store.latest(profileID) != nil else { throw Failure(code: "unknown_profile") }
+    private func deleteProfile(_ profileID: String, restoreOriginal: Bool, token: Data?) throws -> HelperResponse {
+        guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
         guard !tracker.instances(ofProfile: profileID).contains(where: \.isRunning) else { throw Failure(code: "profile_running") }
-        guard verifier.verify(token: token, scope: Self.authorizationScope(forDeletion: profileID), summary: ["删除配置档 \(profileID)"]) else {
+        let restoreLabel = restoreOriginal ? latest.launch?.originalLabel : nil
+        let summary = ["删除配置档 \(profileID)"] + (restoreLabel.map { ["恢复原启动项 \($0)（将无限制运行）"] } ?? [])
+        guard verifier.verify(token: token, scope: Self.authorizationScope(forDeletion: profileID), summary: summary) else {
             throw ApprovalError.authorizationMissing
         }
-        let stamp = String(Int(clock().timeIntervalSince1970))
-        try store.archive(profileID, stamp: stamp)
+        try store.archive(profileID, stamp: String(Int(clock().timeIntervalSince1970)))
+        // A recreated profile with the same name must start clean, not inherit old instances or findings.
+        for instance in tracker.removeInstances(ofProfile: profileID) { verified.removeValue(forKey: instance) }
         observations.removeValue(forKey: profileID)
         proposals = proposals.filter { $0.value.profile.id != profileID }
-        return .deleted(profileID: profileID)
+        return .deleted(profileID: profileID, restoreOriginalLabel: restoreLabel)
     }
 
     private func launchDefinition(_ profileID: String) throws -> (LaunchAgentDefinition, LaunchSettings) {

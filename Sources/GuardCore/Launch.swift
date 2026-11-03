@@ -73,6 +73,14 @@ public struct LaunchAgentDefinition: Equatable, Sendable {
         self.generation = generation
     }
 
+    /// `<prefix>.<profile>` or `<prefix>.<profile>.<generation>`. Profile IDs contain no dots, so a
+    /// prefix match on `knodo` can never catch `knodo-work`.
+    public static func isManagedLabel(_ label: String, profileID: String, labelPrefix: String) -> Bool {
+        let base = labelPrefix + "." + profileID
+        guard label == base || label.hasPrefix(base + ".") else { return false }
+        return !label.dropFirst(base.count + 1).contains(".")
+    }
+
     public var label: String {
         generation.isEmpty ? labelPrefix + "." + profileID : labelPrefix + "." + profileID + "." + generation
     }

@@ -175,7 +175,7 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .extraRuleRemoved(rule): return "- 原样规则 \(rule)"
         case let .launchChanged(to):
             guard let to else { return "- 启动程序" }
-            return "~ 启动程序：" + ([to.executable] + to.arguments).joined(separator: " ")
+            return "~ 启动程序：" + ([to.executable] + to.arguments).joined(separator: " ") + (to.originalLabel.map { "（替换原启动项 \($0)）" } ?? "")
         case let .programAdded(path): return "+ 受管程序 \(path)"
         case let .programRemoved(path): return "- 受管程序 \(path)"
         }

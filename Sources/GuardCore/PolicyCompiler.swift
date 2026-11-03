@@ -40,6 +40,8 @@ public enum CompileError: Error, Equatable, Sendable {
     case invalidHash(String)
     case conflictingHashes(String)
     case mutableExecutableWithoutHash(String)
+    /// The Helper uses the original label in root-owned file paths and launchctl calls.
+    case invalidLaunchLabel(String)
 }
 
 public struct EffectiveFileGrant: Hashable, Sendable {
@@ -112,6 +114,7 @@ public struct PolicyCompiler: Sendable {
         var launch = profile.launch
         if let settings = launch {
             launch?.executable = try canonical(settings.executable).value
+            if let label = settings.originalLabel, !Self.isSafeLaunchLabel(label) { throw CompileError.invalidLaunchLabel(label) }
         }
         let programs = Array(Set(try profile.programs.map { try canonical($0).value })).sorted()
         // The launcher and `guard run` apply the sandbox before exec, so every target they start must
@@ -142,6 +145,15 @@ public struct PolicyCompiler: Sendable {
             launch: launch,
             programs: programs
         )
+    }
+
+    /// Reverse-DNS style, so it is safe as a path component and a launchctl target, and never one of ours.
+    static func isSafeLaunchLabel(_ label: String) -> Bool {
+        func isAlphanumeric(_ c: Unicode.Scalar) -> Bool { ("a"..."z").contains(c) || ("A"..."Z").contains(c) || ("0"..."9").contains(c) }
+        guard let first = label.unicodeScalars.first, isAlphanumeric(first), label.count <= 255, !label.contains(".."),
+              !label.hasPrefix(AgentGuardConfig.bundleIdentifier)
+        else { return false }
+        return label.unicodeScalars.allSatisfy { isAlphanumeric($0) || "._-".unicodeScalars.contains($0) }
     }
 
     private func compileRawRules(_ rules: [String]) throws -> [String] {

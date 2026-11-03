@@ -279,6 +279,8 @@ private struct ManagedProgramsCard: View {
                     Notice(kind: .error,
                            text: "发现 \(unmanaged.count) 个没有经过 AgentGuard 启动的进程（PID \(unmanaged.map(String.init).joined(separator: "、"))），它们不受沙箱限制。请结束这些进程，改用 guard run \(profile.id) -- <命令> 或接管启动项来启动。")
                 }
+                Text("如果程序是脚本（例如 npm 安装的 claude），实际运行的是解释器，直接运行它不会被检测到。")
+                    .font(.caption).foregroundStyle(.secondary)
                 if profile.programs.isEmpty {
                     Text(profile.launch == nil
                          ? "还没有指定程序。指定后，直接运行它（没有经过 guard run）会被报告。"
@@ -330,8 +332,15 @@ private struct DeleteCard: View {
         Card(title: "删除配置档", systemImage: "trash",
              subtitle: "删除全部权限设置和 AgentGuard 安装的启动项，名称可以重新使用；已批准的历史修订会归档保留。") {
             HStack(spacing: 12) {
-                Button("删除配置档…", role: .destructive) { model.deleteProfile(profile.id) }
-                    .disabled(running)
+                if profile.launch?.originalLabel != nil {
+                    Button("删除并恢复原启动项…", role: .destructive) { model.deleteProfile(profile.id, restoreOriginal: true) }
+                        .disabled(running)
+                    Button("删除，不恢复…", role: .destructive) { model.deleteProfile(profile.id) }
+                        .disabled(running)
+                } else {
+                    Button("删除配置档…", role: .destructive) { model.deleteProfile(profile.id) }
+                        .disabled(running)
+                }
                 if running {
                     Text("还有运行中的实例，先停止它再删除").font(.callout).foregroundStyle(.secondary)
                 }

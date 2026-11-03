@@ -99,6 +99,14 @@ public struct InstanceTracker: Sendable {
 
     public func snapshot(of id: Int) -> InstanceSnapshot? { instances[id] }
 
+    /// Forgets every instance of a deleted profile; returns their IDs.
+    public mutating func removeInstances(ofProfile profileID: String) -> [Int] {
+        let ids = instances.values.filter { $0.profileID == profileID }.map(\.id)
+        for id in ids { instances.removeValue(forKey: id) }
+        owners = owners.filter { !ids.contains($0.value) }
+        return ids.sorted()
+    }
+
     public func instances(ofProfile profileID: String) -> [InstanceSnapshot] {
         instances.values.filter { $0.profileID == profileID }.sorted { $0.id < $1.id }
     }

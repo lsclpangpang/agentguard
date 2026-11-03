@@ -34,6 +34,9 @@ public final class InMemoryFileStore: FileStore, @unchecked Sendable {
 
     public func move(_ source: String, to destination: String) throws {
         lock.lock(); defer { lock.unlock() }
+        guard !files.keys.contains(where: { $0 == destination || $0.hasPrefix(destination + "/") }) else {
+            throw CocoaError(.fileWriteFileExists)
+        }
         for (path, data) in files where path == source || path.hasPrefix(source + "/") {
             files.removeValue(forKey: path)
             files[destination + path.dropFirst(source.count)] = data
@@ -123,7 +126,14 @@ public struct ProfileStore: Sendable {
     /// Moves every revision of `id` to `<root>/deleted/<id>-<stamp>`, so the name is free again but the
     /// approved history is kept.
     public func archive(_ id: String, stamp: String) throws {
-        try files.move(try directory(id), to: root + "/deleted/" + id + "-" + stamp)
+        let existing = Set(try archivedProfiles())
+        var name = id + "-" + stamp
+        var counter = 1
+        while existing.contains(name) {
+            counter += 1
+            name = id + "-" + stamp + "-" + String(counter)
+        }
+        try files.move(try directory(id), to: root + "/deleted/" + name)
     }
 
     /// Names of archived profile directories, oldest first.

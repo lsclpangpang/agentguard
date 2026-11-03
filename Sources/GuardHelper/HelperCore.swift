@@ -235,10 +235,20 @@ final class HelperCore {
             if !installLaunchAgent(label: label, profileID: profileID, originalLabel: originalLabel, plist: plist, config: config, owner: owner) {
                 return .failure(code: "launchctl_failed")
             }
-        case let .deleted(profileID):
+        case let .deleted(profileID, restoreOriginalLabel):
             // The profile is gone, so any of its managed LaunchAgents would only fail to start.
-            removeStaleLaunchAgents(except: "", profileID: profileID, domain: "gui/\(owner.uid)")
-            if let path = instanceRecordPath(profileID) { try? FileManager.default.removeItem(atPath: path) }
+            let domain = "gui/\(owner.uid)"
+            removeStaleLaunchAgents(except: "", profileID: profileID, domain: domain)
+            if let restoreOriginalLabel { restoreOriginalLaunchAgent(restoreOriginalLabel, config: config, domain: domain) }
+            // Archived, not removed: it may hold the agent's working files. A recreated profile with
+            // the same name must not see the old contents (or the old instance record).
+            let state = config.stateRoot + "/" + profileID
+            if FileManager.default.fileExists(atPath: state) {
+                let archive = config.stateRoot + "/.deleted/" + profileID + "-" + UUID().uuidString.lowercased()
+                try? FileManager.default.createDirectory(atPath: config.stateRoot + "/.deleted", withIntermediateDirectories: true,
+                                                         attributes: [.posixPermissions: 0o700])
+                try? FileManager.default.moveItem(atPath: state, toPath: archive)
+            }
             refreshCollector()
         case let .removal(label, restoreOriginalLabel):
             guard case let .removeManagement(profileID, _, _) = request else { return response }
@@ -284,12 +294,10 @@ final class HelperCore {
     }
 
     private func removeStaleLaunchAgents(except keep: String, profileID: String, domain: String) {
-        let base = AgentGuardConfig.labelPrefix + "." + profileID
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/Library/LaunchAgents") else { return }
         for entry in entries where entry.hasSuffix(".plist") {
             let label = String(entry.dropLast(6))
-            // `<base>` or `<base>.<generation>`; a bare prefix match would also catch `knodo-work` for `knodo`.
-            guard label == base || label.hasPrefix(base + "."), label != keep else { continue }
+            guard LaunchAgentDefinition.isManagedLabel(label, profileID: profileID, labelPrefix: AgentGuardConfig.labelPrefix), label != keep else { continue }
             _ = Launchctl.run(["bootout", "\(domain)/\(label)"])
             try? FileManager.default.removeItem(atPath: "/Library/LaunchAgents/\(entry)")
         }
@@ -301,6 +309,10 @@ final class HelperCore {
         try? FileManager.default.removeItem(atPath: "/Library/LaunchAgents/\(label).plist")
         removeStaleLaunchAgents(except: "", profileID: profileID, domain: domain)
         guard let originalLabel else { return }
+        restoreOriginalLaunchAgent(originalLabel, config: config, domain: domain)
+    }
+
+    private func restoreOriginalLaunchAgent(_ originalLabel: String, config: AgentGuardConfig, domain: String) {
         let backup = config.configRoot + "/backups/\(originalLabel).plist"
         guard let location = try? String(contentsOfFile: backup + ".location", encoding: .utf8), FileManager.default.fileExists(atPath: backup) else { return }
         try? FileManager.default.moveItem(atPath: backup, toPath: location)

@@ -140,7 +140,7 @@ import Testing
         let store = ProfileStore(root: "/store", files: InMemoryFileStore())
         let s = service(store)
         create(s, F.profile())
-        #expect(s.handle(.deleteProfile(profileID: "knodo", authorization: token), caller: F.appCaller, process: appProcess) == .deleted(profileID: "knodo"))
+        #expect(s.handle(.deleteProfile(profileID: "knodo", restoreOriginal: false, authorization: token), caller: F.appCaller, process: appProcess) == .deleted(profileID: "knodo", restoreOriginalLabel: nil))
         #expect(try store.profileIDs() == [])
         #expect(try store.latest("knodo") == nil)
         #expect(try store.archivedProfiles().count == 1)
@@ -150,7 +150,7 @@ import Testing
         let store = ProfileStore(root: "/store", files: InMemoryFileStore())
         let s = service(store)
         create(s, F.profile())
-        _ = s.handle(.deleteProfile(profileID: "knodo", authorization: token), caller: F.appCaller, process: appProcess)
+        _ = s.handle(.deleteProfile(profileID: "knodo", restoreOriginal: false, authorization: token), caller: F.appCaller, process: appProcess)
         create(s, F.profile(files: [F.ro("/Users/me/notes")]))
         #expect(try store.latest("knodo")?.revision == 1)
         #expect(try store.latest("knodo")?.files == [F.ro("/Users/me/notes")])
@@ -160,9 +160,9 @@ import Testing
         let store = ProfileStore(root: "/store", files: InMemoryFileStore())
         let s = service(store)
         create(s, F.profile())
-        #expect(s.handle(.deleteProfile(profileID: "knodo", authorization: token), caller: F.cliCaller, process: launcherProcess) == .failure(code: "not_trusted"))
+        #expect(s.handle(.deleteProfile(profileID: "knodo", restoreOriginal: false, authorization: token), caller: F.cliCaller, process: launcherProcess) == .failure(code: "not_trusted"))
         let denied = service(store, accept: false)
-        #expect(denied.handle(.deleteProfile(profileID: "knodo", authorization: token), caller: F.appCaller, process: appProcess) == .failure(code: "authorization_missing"))
+        #expect(denied.handle(.deleteProfile(profileID: "knodo", restoreOriginal: false, authorization: token), caller: F.appCaller, process: appProcess) == .failure(code: "authorization_missing"))
         #expect(try store.profileIDs() == ["knodo"])
     }
 
@@ -171,13 +171,13 @@ import Testing
         let s = service(store)
         create(s, F.profile())
         _ = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.launcherCaller, process: launcherProcess)
-        #expect(s.handle(.deleteProfile(profileID: "knodo", authorization: token), caller: F.appCaller, process: appProcess) == .failure(code: "profile_running"))
+        #expect(s.handle(.deleteProfile(profileID: "knodo", restoreOriginal: false, authorization: token), caller: F.appCaller, process: appProcess) == .failure(code: "profile_running"))
         #expect(try store.profileIDs() == ["knodo"])
     }
 
     @Test func deletingAnUnknownProfileFails() {
         let s = service(ProfileStore(root: "/store", files: InMemoryFileStore()))
-        #expect(s.handle(.deleteProfile(profileID: "nope", authorization: token), caller: F.appCaller, process: appProcess) == .failure(code: "unknown_profile"))
+        #expect(s.handle(.deleteProfile(profileID: "nope", restoreOriginal: false, authorization: token), caller: F.appCaller, process: appProcess) == .failure(code: "unknown_profile"))
     }
 
     @Test func scopeAndMessagesAreStable() {
