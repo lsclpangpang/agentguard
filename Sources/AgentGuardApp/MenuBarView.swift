@@ -27,7 +27,7 @@ struct MenuBarView: View {
 
             Divider()
 
-            if let profiles = model.report?.profiles, !profiles.isEmpty {
+            if model.helperReachable, let profiles = model.report?.profiles, !profiles.isEmpty {
                 VStack(spacing: 2) {
                     ForEach(profiles, id: \.profileID) { profile in
                         Button { open(profile.profileID) } label: { MenuProfileRow(profile: profile) }

@@ -315,13 +315,14 @@ private struct AddProgramSheet: View {
     let profileID: String
     let dismiss: () -> Void
     @State private var path = ""
+    @State private var error: String?
 
     private var trimmed: String { path.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private func submit() {
         guard !trimmed.isEmpty else { return }
-        model.addProgram(path: trimmed, to: profileID)
-        dismiss()
+        error = model.addProgram(path: trimmed, to: profileID)
+        if error == nil { dismiss() }
     }
 
     var body: some View {
@@ -333,10 +334,16 @@ private struct AddProgramSheet: View {
             TextField("/path/to/executable", text: $path)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(submit)
+                .onChange(of: path) { error = nil }
+            if let error {
+                Label(error, systemImage: "exclamationmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 Button("选择文件…") {
-                    model.addProgram(to: profileID)
-                    dismiss()
+                    if let picked = model.pickFile() { path = picked }
                 }
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)

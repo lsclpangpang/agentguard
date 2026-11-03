@@ -44,7 +44,9 @@ final class AppModel: ObservableObject {
     var templates: [Template] { config.templates }
 
     var overall: OverallStatus {
-        guard let report else { return OverallStatus(level: .problem, reasons: ["无法连接 Helper"]) }
+        // 失败时会保留上次的 report（避免详情页被拆掉重建），所以可达性要单独判断，
+        // 否则菜单栏会一直显示上次的“均已生效”。
+        guard helperReachable, let report else { return OverallStatus(level: .problem, reasons: ["无法连接 Helper"]) }
         let objects = report.profiles.map { profile in
             ObjectStatus(profileID: profile.profileID,
                          protection: ProtectionState.derive(mode: profile.mode, observeUntil: nil, revision: profile.revisionState, capabilityPassed: true),
@@ -228,8 +230,8 @@ final class AppModel: ObservableObject {
                        launch: launch, programs: program.map { [$0] } ?? []))
     }
 
-    /// Asks for an executable; nil when the user cancels.
-    func chooseExecutable() -> String? {
+    /// Shows the file panel without checking the result; nil when the user cancels.
+    func pickFile() -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -237,27 +239,23 @@ final class AppModel: ObservableObject {
         panel.treatsFilePackagesAsDirectories = true
         panel.message = "选择要管控的可执行文件。按 ⌘⇧G 可以输入路径，例如 /opt/homebrew/bin/claude"
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue,
-              FileManager.default.isExecutableFile(atPath: url.path)
-        else {
-            lastError = "\(url.path) 不是可执行文件。App 请选它包里 Contents/MacOS 下的程序。"
-            return nil
-        }
         return url.path
     }
 
-    func addProgram(to id: String) {
-        guard let path = chooseExecutable() else {
-            // 面板关掉后 AppKit 会把焦点还给窗口里的第一个文本框——也就是「受管程序」的
-            // 路径输入框，SwiftUI 随即滚动过去，界面看起来就是“飘”了一下。
-            NSApp.keyWindow?.makeFirstResponder(nil)
-            return
+    /// Checks a program path and returns the real path to store, or the message to show.
+    func validateProgram(_ path: String) -> Result<String, ProgramPathError> {
+        ProgramPath.validate(path, home: config.home, probe: LocalProgramFileProbe())
+    }
+
+    /// Asks for an executable; nil when the user cancels or picks something that can't be managed.
+    func chooseExecutable() -> String? {
+        guard let path = pickFile() else { return nil }
+        switch validateProgram(path) {
+        case let .success(real): return real
+        case let .failure(error):
+            lastError = "\(path)：" + ProgramPath.message(for: error)
+            return nil
         }
-        edit(id) { profile in
-            if !profile.programs.contains(path) { profile.programs.append(path) }
-        }
-        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     func removeProgram(_ path: String, from id: String) {

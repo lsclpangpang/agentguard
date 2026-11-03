@@ -42,22 +42,17 @@ extension AppModel {
         }
     }
 
-    /// 按路径添加受管程序（界面上的输入框用；文件选择框仍保留）。
-    func addProgram(path: String, to id: String) {
-        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        let expanded = (trimmed as NSString).expandingTildeInPath
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDirectory), !isDirectory.boolValue,
-              FileManager.default.isExecutableFile(atPath: expanded) else {
-            lastError = "\(trimmed) 不是可执行文件。脚本请填它实际启动的程序（例如 node、python3）。"
-            return
+    /// 按路径添加受管程序。校验不通过时返回要在弹窗里显示的原因，弹窗不关、输入不丢。
+    func addProgram(path: String, to id: String) -> String? {
+        switch validateProgram(path) {
+        case let .failure(error):
+            return ProgramPath.message(for: error)
+        case let .success(real):
+            edit(id) { profile in
+                if !profile.programs.contains(real) { profile.programs.append(real) }
+            }
+            return nil
         }
-        edit(id) { profile in
-            if !profile.programs.contains(expanded) { profile.programs.append(expanded) }
-        }
-        // 提交后把焦点还回去，避免下一次窗口重新激活时 SwiftUI 为了露出这个输入框而滚动。
-        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     func setTemplate(_ template: Template, enabled: Bool, in id: String) {
