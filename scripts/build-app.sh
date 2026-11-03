@@ -20,6 +20,16 @@ done
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD_NUMBER/" packaging/Info.plist > "$APP/Contents/Info.plist"
 cp packaging/com.lsclpangpang.agentguard.helper.plist "$APP/Contents/Library/LaunchDaemons/"
 
+# App icon: packaging/AppIcon.png (regenerate with scripts/make-icon.py) -> AppIcon.icns.
+ICONSET=build/AppIcon.iconset
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" packaging/AppIcon.png --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    sips -z "$((size * 2))" "$((size * 2))" packaging/AppIcon.png --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$ICONSET"
+
 # Ad-hoc signatures with fixed identifiers; the Helper pins the resulting cdhashes at runtime.
 sign() { codesign --force --options runtime --timestamp=none --sign - --identifier "$1" "$2"; }
 sign com.lsclpangpang.agentguard.cli "$MACOS/guard"
