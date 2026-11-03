@@ -43,5 +43,5 @@ scripts/build-app.sh            # 在 macOS 上构建 build/AgentGuard.zip（ad-
 1. 从 Releases 下载 `AgentGuard.zip`，解压后拖进“应用程序”，运行 `xattr -cr /Applications/AgentGuard.app`（未公证）。
 2. 打开 App →“安装 Helper”，在“系统设置 > 通用 > 登录项 > 允许在后台”中允许 AgentGuard。
    第一次点“安装 Helper”时 macOS 会拒绝启动尚未允许的后台项目，这是正常流程；允许后 App 会自动连上。
-3. 在“隐私与安全性 > 完全磁盘访问”中添加 `/Applications/AgentGuard.app/Contents/MacOS/agentguard-helper`（选择窗口里按 ⌘⇧G 输入路径），然后运行 `sudo launchctl kickstart -k system/com.lsclpangpang.agentguard.helper`。eslogger 由 Helper 启动，系统按 Helper 判断授权；不授权只能看到沙箱拒绝记录，看不到进程生命周期。
+3. 在“隐私与安全性 > 完全磁盘访问”中添加 `/Library/PrivilegedHelperTools/com.lsclpangpang.agentguard.collector`（选择窗口里按 ⌘⇧G 输入路径），然后运行 `sudo launchctl kickstart -k system/com.lsclpangpang.agentguard.collector`。eslogger 由这个独立采集器进程启动，系统按它判断授权；它装在 App 包外，App 重新签名不会让授权失效。不授权只能看到沙箱拒绝记录，看不到进程生命周期。
 4. 新建配置档（默认“受限学习”），用 `guard run` 启动命令；在“待定项”里逐项批准后切换到“强制保护”。

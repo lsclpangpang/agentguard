@@ -4,6 +4,17 @@ public struct AgentGuardConfig: Sendable {
     public static let helperServiceName = "com.lsclpangpang.agentguard.helper"
     public static let helperPlistName = "com.lsclpangpang.agentguard.helper.plist"
     public static let labelPrefix = "com.lsclpangpang.agentguard.managed"
+
+    /// The privileged collector is the process that holds Full Disk Access. It is installed outside
+    /// the app bundle and never replaced by an app rebuild, so its TCC identity stays valid; the
+    /// bundled copy is only source material for the first install.
+    public static let collectorLabel = "com.lsclpangpang.agentguard.collector"
+    public static let collectorPlistName = "com.lsclpangpang.agentguard.collector.plist"
+    public static let collectorSocketPath = "/var/run/com.lsclpangpang.agentguard.collector.sock"
+    public static let privilegedHelperToolsDirectory = "/Library/PrivilegedHelperTools"
+    public static let systemLaunchDaemonsDirectory = "/Library/LaunchDaemons"
+    public static var collectorPath: String { privilegedHelperToolsDirectory + "/" + collectorLabel }
+    public static var collectorPlistPath: String { systemLaunchDaemonsDirectory + "/" + collectorPlistName }
     /// Authorization rights are `<prefix><scope>`; the Helper installs a wildcard rule for the prefix.
     public static let authorizationRightPrefix = "com.lsclpangpang.agentguard."
 
