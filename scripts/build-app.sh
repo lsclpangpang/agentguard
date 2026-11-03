@@ -14,7 +14,7 @@ BIN="$(swift build -c release --arch arm64 --show-bin-path)"
 
 rm -rf build
 mkdir -p "$MACOS" "$APP/Contents/Library/LaunchDaemons" "$APP/Contents/Resources"
-for binary in AgentGuard guard agentguard-launcher agentguard-helper; do
+for binary in AgentGuard guard agentguard-launcher agentguard-helper agentguard-collector; do
     cp "$BIN/$binary" "$MACOS/"
 done
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD_NUMBER/" packaging/Info.plist > "$APP/Contents/Info.plist"
@@ -35,6 +35,9 @@ sign() { codesign --force --options runtime --timestamp=none --sign - --identifi
 sign com.lsclpangpang.agentguard.cli "$MACOS/guard"
 sign com.lsclpangpang.agentguard.launcher "$MACOS/agentguard-launcher"
 sign com.lsclpangpang.agentguard.helper "$MACOS/agentguard-helper"
+# The collector is installed from here into /Library/PrivilegedHelperTools on first run and then
+# never replaced automagically: Full Disk Access is granted to that copy.
+sign com.lsclpangpang.agentguard.collector "$MACOS/agentguard-collector"
 sign com.lsclpangpang.agentguard "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 

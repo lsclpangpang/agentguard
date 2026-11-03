@@ -8,30 +8,44 @@ struct ProfileDetailView: View {
 
     var body: some View {
         if let profile = model.profile(profileID) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 14) {
                     ProfileHeader(profile: profile, status: model.status(for: profileID))
-                    PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
-                    FilesCard(profile: profile)
-                    TemplatesCard(profile: profile)
-                    ProgramsAndNetworkCard(profile: profile)
-                    if profile.launch != nil { LaunchCard(profile: profile) }
+                    HStack(spacing: 12) {
+                        Text("保护模式").font(.callout.weight(.medium))
+                        Picker("保护模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
+                            Text(Mode.restrictedLearning.displayName).tag(Mode.restrictedLearning)
+                            Text(Mode.enforce.displayName).tag(Mode.enforce)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: 260)
+                        .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
+                        Spacer(minLength: 0)
+                    }
                 }
                 .padding(20)
-                .frame(maxWidth: 860, alignment: .leading)
+                .frame(maxWidth: 900, alignment: .leading)
                 .frame(maxWidth: .infinity)
-            }
-            .navigationTitle(profileID)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Picker("模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
-                        Label(Mode.restrictedLearning.displayName, systemImage: Mode.restrictedLearning.symbol).tag(Mode.restrictedLearning)
-                        Label(Mode.enforce.displayName, systemImage: Mode.enforce.symbol).tag(Mode.enforce)
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
+                        FilesCard(profile: profile)
+                        TemplatesCard(profile: profile)
+                        ProgramsAndNetworkCard(profile: profile)
+                        if profile.launch != nil { LaunchCard(profile: profile) }
                     }
-                    .pickerStyle(.segmented)
-                    .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
+                    .padding(20)
+                    .frame(maxWidth: 900, alignment: .leading)
+                    .frame(maxWidth: .infinity)
                 }
+                .clipped()
             }
+            .background(Color(nsColor: .windowBackgroundColor))
+            .navigationTitle(profileID)
         }
     }
 }
@@ -45,22 +59,18 @@ private struct ProfileHeader: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
-            IconTile(systemImage: profile.mode.symbol, tint: profile.mode.tint, size: 52)
+            IconTile(systemImage: profile.mode.symbol, tint: profile.mode.tint, size: 40)
             VStack(alignment: .leading, spacing: 8) {
-                Text(profile.id).font(.largeTitle.weight(.semibold))
-                HStack(spacing: 6) {
-                    Chip(text: profile.mode.displayName, systemImage: profile.mode.symbol, tint: profile.mode.tint)
-                    if let status {
-                        Chip(text: status.revisionState.displayText, tint: status.revisionState.tint)
-                        Chip(text: "修订 \(status.savedRevision)")
-                        if !status.runningInstances.isEmpty {
-                            Chip(text: "\(status.runningInstances.count) 个运行实例", systemImage: "bolt.fill", tint: .green)
-                        }
-                    }
+                Text(profile.id).font(.title2.weight(.semibold)).lineLimit(2)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) { statusChips }
+                    VStack(alignment: .leading, spacing: 6) { statusChips }
                 }
                 Text(profile.mode.explanation).font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    Text(command).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    Text(command).font(.system(.callout, design: .monospaced))
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     Button {
                         Pasteboard.copy("guard run \(profile.id) -- ")
                         copied = true
@@ -75,9 +85,19 @@ private struct ProfileHeader: View {
                 .padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.bottom, 4)
+    }
+
+    @ViewBuilder private var statusChips: some View {
+        Chip(text: profile.mode.displayName, systemImage: profile.mode.symbol, tint: profile.mode.tint)
+        if let status {
+            Chip(text: status.revisionState.displayText, tint: status.revisionState.tint)
+            Chip(text: "修订 \(status.savedRevision)")
+            if !status.runningInstances.isEmpty {
+                Chip(text: "\(status.runningInstances.count) 个运行实例", systemImage: "bolt.fill", tint: .green)
+            }
+        }
     }
 }
 
@@ -251,7 +271,8 @@ private struct ProgramsAndNetworkCard: View {
                         ForEach(profile.exec, id: \.path) { grant in
                             HStack(spacing: 8) {
                                 Image(systemName: "play.square").foregroundStyle(.secondary)
-                                Text(PathLabel.abbreviate(grant.path)).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                                Text(PathLabel.abbreviate(grant.path)).font(.system(.callout, design: .monospaced))
+                                    .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(grant.path)
                                 if grant.sha256 != nil { Chip(text: "限定哈希", systemImage: "number") }
                             }
                         }
@@ -260,10 +281,10 @@ private struct ProgramsAndNetworkCard: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("本机 TCP 端口").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
-                    HStack(spacing: 6) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), alignment: .leading)], alignment: .leading, spacing: 8) {
                         ForEach(profile.network.loopbackTCPConnect, id: \.self) { port in
                             HStack(spacing: 4) {
-                                Text("\(port)").font(.system(.callout, design: .monospaced))
+                                Text(verbatim: String(port)).font(.system(.callout, design: .monospaced)).lineLimit(1)
                                 Button {
                                     model.edit(profile.id) { $0.network.loopbackTCPConnect.removeAll { $0 == port } }
                                 } label: { Image(systemName: "xmark.circle.fill") }
@@ -273,7 +294,10 @@ private struct ProgramsAndNetworkCard: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                             .background(Capsule().fill(Color.primary.opacity(0.06)))
+                            .fixedSize()
                         }
+                    }
+                    HStack(spacing: 8) {
                         TextField("端口", text: $newPort)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 80)
@@ -322,16 +346,20 @@ private struct LaunchCard: View {
                     if let original = launch.originalLabel {
                         Label("原启动项：\(original)", systemImage: "arrow.uturn.backward").font(.callout).foregroundStyle(.secondary)
                     }
-                    HStack {
-                        Button("接管启动项") { model.installLaunchAgent(profile.id) }
-                            .buttonStyle(.borderedProminent)
-                        Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
-                        Spacer()
-                        Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 12) { actions }
+                        VStack(alignment: .leading, spacing: 10) { actions }
                     }
                 }
             }
         }
+    }
+
+    @ViewBuilder private var actions: some View {
+        Button("接管启动项") { model.installLaunchAgent(profile.id) }
+            .buttonStyle(.borderedProminent)
+        Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
+        Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
     }
 }
 #endif

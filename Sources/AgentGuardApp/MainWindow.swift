@@ -18,6 +18,7 @@ struct MainWindow: View {
         } detail: {
             detail
         }
+        .navigationSplitViewStyle(.balanced)
         .sheet(isPresented: $creating) {
             NewProfileSheet(isPresented: $creating).environmentObject(model)
         }
@@ -87,7 +88,7 @@ struct MainWindow: View {
                 if !model.helperReachable {
                     OnboardingView()
                 } else if let selection, model.profile(selection) != nil {
-                    ProfileDetailView(profileID: selection).id("\(selection)-\(model.revision)")
+                    ProfileDetailView(profileID: selection).id(selection)
                 } else {
                     ContentUnavailableView("选择一个配置档", systemImage: "shield.lefthalf.filled",
                                            description: Text("或者点工具栏的 + 新建，开始为命令行工具或 Agent 设定权限。"))
