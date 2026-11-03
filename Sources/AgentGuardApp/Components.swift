@@ -139,3 +139,43 @@ enum Pasteboard {
     }
 }
 #endif
+
+/// 变更确认：窗口内的 sheet。NSAlert 的 sheet/runModal 在菜单栏 App 上会挂到看不见的窗口，
+/// 结果就是内容点不动、只有滚轮还活着。
+struct ConfirmationSheet: View {
+    let pending: PendingConfirmation
+    let answer: (Bool) -> Void
+
+    private var text: String { pending.lines.joined(separator: "\n") }
+
+    private var needsScroll: Bool { pending.lines.count > 8 || text.count > 480 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(pending.title).font(.headline)
+            if needsScroll {
+                Text("共 \(pending.lines.count) 行变更，滚动查看全部内容。")
+                    .font(.callout).foregroundStyle(.secondary)
+                ScrollView {
+                    Text(text)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(height: 320)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            } else if !text.isEmpty {
+                Text(text).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button("取消") { answer(false) }.keyboardShortcut(.cancelAction)
+                Button("确认") { answer(true) }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 660)
+    }
+}

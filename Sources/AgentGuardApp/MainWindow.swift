@@ -22,6 +22,9 @@ struct MainWindow: View {
         .sheet(isPresented: $creating) {
             NewProfileSheet(isPresented: $creating).environmentObject(model)
         }
+        .sheet(item: $model.confirmation) { pending in
+            ConfirmationSheet(pending: pending) { model.answerConfirmation($0) }
+        }
         .background(WindowAccessor { MainWindowBehavior.apply(pinned: pinned, to: $0) })
         .toolbar {
             ToolbarItem(placement: .automatic) {
