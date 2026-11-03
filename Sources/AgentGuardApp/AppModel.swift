@@ -33,7 +33,8 @@ final class AppModel: ObservableObject {
         let objects = report.profiles.map { profile in
             ObjectStatus(profileID: profile.profileID,
                          protection: ProtectionState.derive(mode: profile.mode, observeUntil: nil, revision: profile.revisionState, capabilityPassed: true),
-                         revision: profile.revisionState, pendingItems: profile.pendingCount, unmanagedInstances: 0)
+                         revision: profile.revisionState, pendingItems: profile.pendingCount, unmanagedInstances: 0,
+                         detachedInstances: profile.detachedInstances.count)
         }
         let health = CollectorHealth(problems: report.collectorProblems.isEmpty ? [] : [.interrupted])
         return OverallStatus.evaluate(objects: objects, collector: health, capabilityCheckPassed: true)

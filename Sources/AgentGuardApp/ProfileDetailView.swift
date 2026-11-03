@@ -97,6 +97,9 @@ private struct ProfileHeader: View {
             if !status.runningInstances.isEmpty {
                 Chip(text: "\(status.runningInstances.count) 个运行实例", systemImage: "bolt.fill", tint: .green)
             }
+            if !status.detachedInstances.isEmpty {
+                Chip(text: "已脱离 launchd 看护", systemImage: "exclamationmark.triangle.fill", tint: .orange)
+            }
         }
     }
 }
@@ -343,6 +346,10 @@ private struct LaunchCard: View {
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+                    if !(model.status(for: profile.id)?.detachedInstances.isEmpty ?? true) {
+                        Notice(kind: .warning,
+                               text: "启动入口已经退出，但它启动的进程还在运行。launchd 只看护入口进程，这些进程崩溃后不会被自动拉起。请让入口脚本用 exec 在前台运行目标程序，不要用 & 或 nohup 把它放到后台。")
+                    }
                     if let original = launch.originalLabel {
                         Label("原启动项：\(original)", systemImage: "arrow.uturn.backward").font(.callout).foregroundStyle(.secondary)
                     }

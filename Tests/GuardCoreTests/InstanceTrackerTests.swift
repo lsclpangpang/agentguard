@@ -12,6 +12,47 @@ import Testing
         return t
     }
 
+    func launchdTracker() -> InstanceTracker {
+        var t = InstanceTracker()
+        t.register(instance: 1, profileID: "knodo", revision: 3, root: root, supervisedByLaunchd: true)
+        return t
+    }
+
+    @Test func entryThatBackgroundsItsWorkAndExitsLeavesTheInstanceDetached() {
+        var t = launchdTracker()
+        t.handle(.fork(parent: root, child: a))
+        #expect(t.snapshot(of: 1)?.detachedFromLaunchd == false)
+        t.handle(.exit(root))
+        #expect(t.isRunning(1))
+        #expect(t.snapshot(of: 1)?.detachedFromLaunchd == true)
+    }
+
+    @Test func entryThatExecsTheDaemonStaysSupervised() {
+        var t = launchdTracker()
+        let daemon = ProcessKey(pid: 100, version: 2)
+        t.handle(.exec(from: root, to: daemon))
+        t.handle(.fork(parent: daemon, child: a))
+        t.handle(.exit(a))
+        #expect(t.snapshot(of: 1)?.detachedFromLaunchd == false)
+        t.handle(.exit(daemon))
+        #expect(t.snapshot(of: 1)?.detachedFromLaunchd == false)
+    }
+
+    @Test func instanceIsNoLongerDetachedOnceEveryProcessHasExited() {
+        var t = launchdTracker()
+        t.handle(.fork(parent: root, child: a))
+        t.handle(.exit(root))
+        t.handle(.exit(a))
+        #expect(t.snapshot(of: 1)?.detachedFromLaunchd == false)
+    }
+
+    @Test func interactiveRunsAreNeverReportedAsDetached() {
+        var t = tracker()
+        t.handle(.fork(parent: root, child: a))
+        t.handle(.exit(root))
+        #expect(t.snapshot(of: 1)?.detachedFromLaunchd == false)
+    }
+
     @Test func registeredRootIsLive() {
         let t = tracker()
         #expect(t.liveProcesses(of: 1) == [root])

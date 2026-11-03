@@ -20,6 +20,12 @@ import Testing
         #expect(unreachable.level == .problem)
         #expect(report.profiles.first?.revisionState.displayText == "已生效")
         #expect(Mode.restrictedLearning.displayName == "受限学习")
+
+        let detached = ProfileStatusReport(profileID: "knodo", savedRevision: 2, mode: .enforce, revisionState: .applied(running: true),
+                                           runningInstances: [1], pendingCount: 0, detachedInstances: [1])
+        let object = ObjectStatus(profileID: detached.profileID, protection: .enforced, revision: detached.revisionState, pendingItems: 0,
+                                  unmanagedInstances: 0, detachedInstances: detached.detachedInstances.count)
+        #expect(OverallStatus.evaluate(objects: [object], collector: CollectorHealth(problems: []), capabilityCheckPassed: true).level == .attention)
     }
 
     @Test func appProfileEditing() throws {

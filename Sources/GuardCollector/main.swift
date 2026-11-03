@@ -214,6 +214,8 @@ eslogger.start()
 sandboxLog.start()
 running.wait()
 #else
+import Foundation
+
 FileHandle.standardError.write(Data("agentguard-collector 只能在 macOS 上运行\n".utf8))
 exit(1)
 #endif

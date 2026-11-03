@@ -38,4 +38,11 @@ import Testing
         let json = #"{"id":"x","revision":1,"mode":"yolo","templates":[],"files":[],"exec":[],"network":{"loopback_tcp_connect":[],"outbound_tcp":"denied","listen":"denied","udp":"denied"}}"#
         #expect(throws: (any Error).self) { try ProfileCodec.decode(Data(json.utf8)) }
     }
+
+    @Test func statusFromAnOlderHelperDecodesWithoutDetachedInstances() throws {
+        let json = #"{"profileID":"knodo","savedRevision":2,"mode":"enforce","revisionState":{"applied":{"running":true}},"runningInstances":[1],"pendingCount":0}"#
+        let report = try JSONDecoder().decode(ProfileStatusReport.self, from: Data(json.utf8))
+        #expect(report.runningInstances == [1])
+        #expect(report.detachedInstances == [])
+    }
 }

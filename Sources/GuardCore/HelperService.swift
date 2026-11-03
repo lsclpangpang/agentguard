@@ -58,14 +58,34 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var revisionState: RevisionState
     public var runningInstances: [Int]
     public var pendingCount: Int
+    /// Running instances whose launchd entry has exited; see `InstanceSnapshot.detachedFromLaunchd`.
+    public var detachedInstances: [Int]
 
-    public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int) {
+    public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int,
+                detachedInstances: [Int] = []) {
         self.profileID = profileID
         self.savedRevision = savedRevision
         self.mode = mode
         self.revisionState = revisionState
         self.runningInstances = runningInstances
         self.pendingCount = pendingCount
+        self.detachedInstances = detachedInstances
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances
+    }
+
+    /// The app and the helper are updated separately; a report from an older helper has no `detachedInstances`.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        profileID = try c.decode(String.self, forKey: .profileID)
+        savedRevision = try c.decode(Int.self, forKey: .savedRevision)
+        mode = try c.decode(Mode.self, forKey: .mode)
+        revisionState = try c.decode(RevisionState.self, forKey: .revisionState)
+        runningInstances = try c.decode([Int].self, forKey: .runningInstances)
+        pendingCount = try c.decode(Int.self, forKey: .pendingCount)
+        detachedInstances = try c.decodeIfPresent([Int].self, forKey: .detachedInstances) ?? []
     }
 }
 
@@ -220,7 +240,7 @@ public final class HelperService {
                 return try tighten(profile, caller: caller)
             case let .registerInstance(profileID, revision):
                 try require(role, in: [.cli, .launcher])
-                return try register(profileID: profileID, revision: revision, process: process)
+                return try register(profileID: profileID, revision: revision, process: process, supervisedByLaunchd: role == .launcher)
             case let .reportVerification(instance, passed):
                 try require(role, in: [.app, .launcher])
                 verified[instance] = passed
@@ -299,13 +319,13 @@ public final class HelperService {
         return .applied(revision: approved.newRevision)
     }
 
-    private func register(profileID: String, revision: Int, process: ProcessKey) throws -> HelperResponse {
+    private func register(profileID: String, revision: Int, process: ProcessKey, supervisedByLaunchd: Bool) throws -> HelperResponse {
         guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
         guard latest.revision == revision else { throw Failure(code: "stale_revision") }
         let sbpl = renderer.render(try compiler.compile(latest, catalog: catalog))
         let instance = nextInstance
         nextInstance += 1
-        tracker.register(instance: instance, profileID: profileID, revision: revision, root: process)
+        tracker.register(instance: instance, profileID: profileID, revision: revision, root: process, supervisedByLaunchd: supervisedByLaunchd)
         return .registered(instance: instance, sbpl: sbpl)
     }
 
@@ -345,7 +365,8 @@ public final class HelperService {
                 mode: latest.mode,
                 revisionState: RevisionState.evaluate(savedRevision: latest.revision, instances: instances, verified: verified),
                 runningInstances: instances.filter(\.isRunning).map(\.id),
-                pendingCount: try pendingItems(for: latest).count
+                pendingCount: try pendingItems(for: latest).count,
+                detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id)
             )
         }
         return StatusReport(profiles: profiles, collectorProblems: collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description))
