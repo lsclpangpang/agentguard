@@ -26,6 +26,22 @@ import Testing
         let object = ObjectStatus(profileID: detached.profileID, protection: .enforced, revision: detached.revisionState, pendingItems: 0,
                                   unmanagedInstances: 0, detachedInstances: detached.detachedInstances.count)
         #expect(OverallStatus.evaluate(objects: [object], collector: CollectorHealth(problems: []), capabilityCheckPassed: true).level == .attention)
+
+        let unmanaged = ProfileStatusReport(profileID: "knodo", savedRevision: 2, mode: .enforce, revisionState: .applied(running: true),
+                                            runningInstances: [], pendingCount: 0, unmanagedProcesses: [300])
+        #expect(unmanaged.unmanagedProcesses.count == 1)
+    }
+
+    @Test func appProgramsAndDeletion() {
+        let launch = LaunchSettings(executable: "/opt/tool", arguments: [], workingDirectory: nil, originalLabel: nil, restartOnCleanExit: false)
+        var profile = Profile(id: "tool", revision: 1, mode: .restrictedLearning, templates: [], files: [], exec: [], network: NetworkPolicy(),
+                              launch: launch, programs: ["/opt/tool"])
+        profile.programs.removeAll { $0 == "/opt/tool" }
+        #expect(profile.programs.isEmpty)
+        let request = HelperRequest.deleteProfile(profileID: "tool", authorization: nil)
+        #expect(request == .deleteProfile(profileID: "tool", authorization: nil))
+        #expect(HelperService.authorizationScope(forDeletion: "tool") == "delete.tool")
+        #expect(HelperFailure.message(for: "profile_running").contains("运行"))
     }
 
     @Test func appProfileEditing() throws {

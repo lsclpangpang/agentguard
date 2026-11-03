@@ -16,7 +16,8 @@ public enum UnmanagedDetector {
         for (profileID, paths) in targets {
             let canonicalTargets = paths.compactMap { try? CanonicalPath($0, resolver: resolver) }
             let matches = running.filter { process in
-                guard tracker.owner(of: process.key) == nil, let path = try? CanonicalPath(process.executablePath, resolver: resolver) else { return false }
+                // A process listing carries no audit-token version, so ownership is matched by PID.
+                guard tracker.owner(of: process.key) == nil, tracker.owner(ofPID: process.key.pid) == nil, let path = try? CanonicalPath(process.executablePath, resolver: resolver) else { return false }
                 return canonicalTargets.contains { $0.isSame(as: path, caseInsensitive: caseInsensitive) }
             }
             if !matches.isEmpty { found[profileID] = matches.map(\.key).sorted() }

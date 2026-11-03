@@ -72,6 +72,7 @@ final class HelperCore {
             let health = self.collector.health()
             self.queue.async {
                 self.service?.updateCollectorHealth(health)
+                self.service?.updateRunningProcesses(ProcessFacts.allProcesses())
                 self.reconcileInstances()
             }
         }
@@ -234,6 +235,11 @@ final class HelperCore {
             if !installLaunchAgent(label: label, profileID: profileID, originalLabel: originalLabel, plist: plist, config: config, owner: owner) {
                 return .failure(code: "launchctl_failed")
             }
+        case let .deleted(profileID):
+            // The profile is gone, so any of its managed LaunchAgents would only fail to start.
+            removeStaleLaunchAgents(except: "", profileID: profileID, domain: "gui/\(owner.uid)")
+            if let path = instanceRecordPath(profileID) { try? FileManager.default.removeItem(atPath: path) }
+            refreshCollector()
         case let .removal(label, restoreOriginalLabel):
             guard case let .removeManagement(profileID, _, _) = request else { return response }
             removeLaunchAgent(label: label, profileID: profileID, restore: restoreOriginalLabel, config: config, owner: owner)
@@ -278,11 +284,12 @@ final class HelperCore {
     }
 
     private func removeStaleLaunchAgents(except keep: String, profileID: String, domain: String) {
-        let prefix = AgentGuardConfig.labelPrefix + "." + profileID
+        let base = AgentGuardConfig.labelPrefix + "." + profileID
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/Library/LaunchAgents") else { return }
-        for entry in entries where entry.hasPrefix(prefix) && entry.hasSuffix(".plist") {
+        for entry in entries where entry.hasSuffix(".plist") {
             let label = String(entry.dropLast(6))
-            guard label != keep else { continue }
+            // `<base>` or `<base>.<generation>`; a bare prefix match would also catch `knodo-work` for `knodo`.
+            guard label == base || label.hasPrefix(base + "."), label != keep else { continue }
             _ = Launchctl.run(["bootout", "\(domain)/\(label)"])
             try? FileManager.default.removeItem(atPath: "/Library/LaunchAgents/\(entry)")
         }

@@ -36,6 +36,7 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case removeManagement(profileID: String, restoreOriginal: Bool, authorization: Data?)
     /// 重启受管实例：改完规则后旧进程还按老沙箱在跑，必须重启才会装载新规则。
     case restartManagedInstance(profileID: String)
+    case deleteProfile(profileID: String, authorization: Data?)
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -65,9 +66,11 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var pendingCount: Int
     /// Running instances whose launchd entry has exited; see `InstanceSnapshot.detachedFromLaunchd`.
     public var detachedInstances: [Int]
+    /// PIDs running one of the profile's programs outside any managed instance, as of the last process scan.
+    public var unmanagedProcesses: [Int32]
 
     public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int,
-                detachedInstances: [Int] = []) {
+                detachedInstances: [Int] = [], unmanagedProcesses: [Int32] = []) {
         self.profileID = profileID
         self.savedRevision = savedRevision
         self.mode = mode
@@ -75,10 +78,11 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         self.runningInstances = runningInstances
         self.pendingCount = pendingCount
         self.detachedInstances = detachedInstances
+        self.unmanagedProcesses = unmanagedProcesses
     }
 
     enum CodingKeys: String, CodingKey {
-        case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances
+        case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances, unmanagedProcesses
     }
 
     /// The app and the helper are updated separately; a report from an older helper has no `detachedInstances`.
@@ -91,6 +95,7 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         runningInstances = try c.decode([Int].self, forKey: .runningInstances)
         pendingCount = try c.decode(Int.self, forKey: .pendingCount)
         detachedInstances = try c.decodeIfPresent([Int].self, forKey: .detachedInstances) ?? []
+        unmanagedProcesses = try c.decodeIfPresent([Int32].self, forKey: .unmanagedProcesses) ?? []
     }
 }
 
@@ -117,6 +122,8 @@ public enum HelperResponse: Codable, Equatable, Sendable {
     case pendingItems([PendingItem])
     /// 平台层先结束 `pids` 里的进程，再用 `plist` 重新注册 `label`。
     case restartManaged(label: String, originalLabel: String?, plist: Data, pids: [Int32])
+    /// The profile was archived; the platform layer removes its managed LaunchAgents and state.
+    case deleted(profileID: String)
     case ok
     case failure(code: String)
 }
@@ -164,6 +171,7 @@ public final class HelperService {
     private var nextInstance = 1
     private var observations: [String: [Observation]] = [:]
     private var collectorHealth = CollectorHealth(problems: [.notStarted])
+    private var runningProcesses: [RunningProcess] = []
     private let environment: CompileEnvironment
     private static let observationLimit = 5000
     /// Set by the platform layer, which owns the collector's health monitor.
@@ -209,6 +217,11 @@ public final class HelperService {
 
     public func managedInstance(of process: ProcessKey) -> Int? {
         tracker.owner(of: process)
+    }
+
+    /// The latest scan of running processes, used to report programs started outside AgentGuard.
+    public func updateRunningProcesses(_ processes: [RunningProcess]) {
+        runningProcesses = processes
     }
 
     public func updateCollectorHealth(_ health: CollectorHealth) {
@@ -298,6 +311,9 @@ public final class HelperService {
             case let .restartManagedInstance(profileID):
                 try require(role, in: [.app])
                 return try restartManaged(profileID)
+            case let .deleteProfile(profileID, authorization):
+                try require(role, in: [.app])
+                return try deleteProfile(profileID, token: authorization)
             }
         } catch let failure as Failure {
             return .failure(code: failure.code)
@@ -375,6 +391,22 @@ public final class HelperService {
 
     public static func authorizationScope(forChange changeID: String) -> String { "change." + changeID }
     public static func authorizationScope(forRemoval profileID: String) -> String { "remove." + profileID }
+    public static func authorizationScope(forDeletion profileID: String) -> String { "delete." + profileID }
+
+    /// Archives the profile. A running instance keeps the sandbox it started with, but nothing could
+    /// restart it or show its state any more, so it has to be stopped first.
+    private func deleteProfile(_ profileID: String, token: Data?) throws -> HelperResponse {
+        guard try store.latest(profileID) != nil else { throw Failure(code: "unknown_profile") }
+        guard !tracker.instances(ofProfile: profileID).contains(where: \.isRunning) else { throw Failure(code: "profile_running") }
+        guard verifier.verify(token: token, scope: Self.authorizationScope(forDeletion: profileID), summary: ["删除配置档 \(profileID)"]) else {
+            throw ApprovalError.authorizationMissing
+        }
+        let stamp = String(Int(clock().timeIntervalSince1970))
+        try store.archive(profileID, stamp: stamp)
+        observations.removeValue(forKey: profileID)
+        proposals = proposals.filter { $0.value.profile.id != profileID }
+        return .deleted(profileID: profileID)
+    }
 
     private func launchDefinition(_ profileID: String) throws -> (LaunchAgentDefinition, LaunchSettings) {
         guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
@@ -414,6 +446,14 @@ public final class HelperService {
     }
 
     private func statusReport() throws -> StatusReport {
+        var targets: [String: [String]] = [:]
+        for id in try store.profileIDs() {
+            if let latest = try store.latest(id), let policy = try? compiler.compile(latest, catalog: catalog) {
+                targets[id] = policy.detectionTargets
+            }
+        }
+        let unmanaged = UnmanagedDetector.detect(running: runningProcesses, tracker: tracker, targets: targets,
+                                                 resolver: environment.resolver, caseInsensitive: environment.caseInsensitive)
         let profiles = try store.profileIDs().compactMap { id -> ProfileStatusReport? in
             guard let latest = try store.latest(id) else { return nil }
             let instances = tracker.instances(ofProfile: id)
@@ -424,7 +464,8 @@ public final class HelperService {
                 revisionState: RevisionState.evaluate(savedRevision: latest.revision, instances: instances, verified: verified),
                 runningInstances: instances.filter(\.isRunning).map(\.id),
                 pendingCount: try pendingItems(for: latest).count,
-                detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id)
+                detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id),
+                unmanagedProcesses: unmanaged[id]?.map(\.pid) ?? []
             )
         }
         return StatusReport(profiles: profiles, collectorProblems: collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description))

@@ -158,9 +158,12 @@ public struct Profile: Codable, Hashable, Sendable {
     /// Verbatim single-form allow rules carried over from a migrated installation.
     public var extraRules: [String]
     public var launch: LaunchSettings?
+    /// Executables this profile manages, whether started by `guard run` or by the launcher. They are
+    /// granted read and exec automatically, and a copy running outside AgentGuard is reported.
+    public var programs: [String]
 
     public init(id: String, revision: Int, mode: Mode, templates: [TemplateRef], files: [FileGrant], exec: [ExecGrant], network: NetworkPolicy,
-                unrestrictedExec: Bool = false, extraRules: [String] = [], launch: LaunchSettings? = nil) {
+                unrestrictedExec: Bool = false, extraRules: [String] = [], launch: LaunchSettings? = nil, programs: [String] = []) {
         self.id = id
         self.revision = revision
         self.mode = mode
@@ -171,10 +174,11 @@ public struct Profile: Codable, Hashable, Sendable {
         self.unrestrictedExec = unrestrictedExec
         self.extraRules = extraRules
         self.launch = launch
+        self.programs = programs
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, revision, mode, templates, files, exec, network, launch
+        case id, revision, mode, templates, files, exec, network, launch, programs
         case unrestrictedExec = "unrestricted_exec"
         case extraRules = "extra_rules"
     }
@@ -191,6 +195,7 @@ public struct Profile: Codable, Hashable, Sendable {
         unrestrictedExec = try c.decodeIfPresent(Bool.self, forKey: .unrestrictedExec) ?? false
         extraRules = try c.decodeIfPresent([String].self, forKey: .extraRules) ?? []
         launch = try c.decodeIfPresent(LaunchSettings.self, forKey: .launch)
+        programs = try c.decodeIfPresent([String].self, forKey: .programs) ?? []
     }
 
     /// Drops file grants whose expiry has passed; the caller turns the result into a tightening revision.
