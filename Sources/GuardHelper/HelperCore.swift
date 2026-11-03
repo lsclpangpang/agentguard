@@ -88,6 +88,9 @@ final class HelperCore {
                    case let .registered(instance, _) = response {
                     recordInstance(profileID: profileID, instance: instance, revision: revision, root: process)
                 }
+                if case let .reportVerification(instance, passed) = request, case .ok = response {
+                    recordVerification(instance: instance, passed: passed)
+                }
             } else {
                 response = .failure(code: "not_trusted")
             }
@@ -148,14 +151,17 @@ final class HelperCore {
         /// 由启动器注册的实例受 launchd 看护；恢复时要把这个事实一起带回来，
         /// 否则重启 Helper 之后 detached 判定会静默消失。
         var supervisedByLaunchd: Bool
+        /// 启动器上报的验收结论；没上报过就是 nil。
+        var verified: Bool?
 
         /// 合成的 Decodable 不认属性默认值，老记录缺这个 key 会直接解码失败、恢复整个失效。
-        init(instance: Int, revision: Int, pid: Int32, startTime: UInt64, supervisedByLaunchd: Bool) {
+        init(instance: Int, revision: Int, pid: Int32, startTime: UInt64, supervisedByLaunchd: Bool, verified: Bool?) {
             self.instance = instance
             self.revision = revision
             self.pid = pid
             self.startTime = startTime
             self.supervisedByLaunchd = supervisedByLaunchd
+            self.verified = verified
         }
 
         init(from decoder: Decoder) throws {
@@ -165,6 +171,7 @@ final class HelperCore {
             pid = try c.decode(Int32.self, forKey: .pid)
             startTime = try c.decode(UInt64.self, forKey: .startTime)
             supervisedByLaunchd = try c.decodeIfPresent(Bool.self, forKey: .supervisedByLaunchd) ?? false
+            verified = try c.decodeIfPresent(Bool.self, forKey: .verified)
         }
     }
 
@@ -177,8 +184,21 @@ final class HelperCore {
               let startTime = ProcessFacts.startTime(pid: root.pid) else { return }
         let snapshot = service?.instances(ofProfile: profileID).first { $0.id == instance }
         let record = InstanceRecord(instance: instance, revision: revision, pid: root.pid, startTime: startTime,
-                                    supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false)
+                                    supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false, verified: nil)
         try? JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    private func recordVerification(instance: Int, passed: Bool) {
+        guard let config else { return }
+        for profileID in ((try? config.store.profileIDs()) ?? []) {
+            guard let path = instanceRecordPath(profileID),
+                  let data = FileManager.default.contents(atPath: path),
+                  var record = try? JSONDecoder().decode(InstanceRecord.self, from: data),
+                  record.instance == instance
+            else { continue }
+            record.verified = passed
+            try? JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path), options: .atomic)
+        }
     }
 
     func reconcileInstances() {
@@ -202,7 +222,7 @@ final class HelperCore {
             if service.instances(ofProfile: profileID).contains(where: { $0.isRunning }) { continue }
             service.restoreInstance(id: record.instance, profileID: profileID, revision: record.revision,
                                     root: ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime)),
-                                    supervisedByLaunchd: record.supervisedByLaunchd)
+                                    supervisedByLaunchd: record.supervisedByLaunchd, verified: record.verified)
         }
     }
 

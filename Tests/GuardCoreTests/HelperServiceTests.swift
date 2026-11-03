@@ -248,7 +248,8 @@ struct FakeVerifier: AuthorizationVerifier {
         guard case let .pendingItems(items) = s.handle(.pendingItems(profileID: "knodo"), caller: F.appCaller, process: fresh) else {
             Issue.record("expected pending items"); return
         }
-        #expect(items.map(\.suggestion) == [.file(path: "/private/tmp/claude-501/x", kind: .file, access: .readWrite)])
+        // 临时目录按目录聚合，避免为易变的文件名逐条出建议。
+        #expect(items.map(\.suggestion) == [Suggestion.file(path: "/private/tmp/claude-501", kind: .directory, access: Access.readWrite)])
         guard case let .status(report) = s.handle(.status, caller: F.appCaller, process: fresh) else {
             Issue.record("expected status"); return
         }
