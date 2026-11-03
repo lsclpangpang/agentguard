@@ -169,7 +169,7 @@ final class AppModel: ObservableObject {
                     await MainActor.run { self.lastError = "没有变化" }
                     return
                 }
-                let confirmed = await MainActor.run { Self.confirm(title: "确认权限变更：\(profile.id)", lines: info.summary) }
+                let confirmed = await Self.confirm(title: "确认权限变更：\(profile.id)", lines: info.summary)
                 guard confirmed else { return }
                 var token: Data?
                 if info.requiresAuthorization {
@@ -247,23 +247,33 @@ final class AppModel: ObservableObject {
             var result = try LegacyImporter.importInstallation(profileID: "knodo", allowlistJSON: allowlist, policySBPL: policy)
             result.profile.launch = LaunchSettings(executable: root + "/entry.sh", arguments: [], workingDirectory: nil,
                                                    originalLabel: "com.knodo.restricted-agent", restartOnCleanExit: true)
-            if !result.unimportedRules.isEmpty {
-                _ = Self.confirm(title: "以下规则无法导入，请手动核对", lines: result.unimportedRules)
+            Task {
+                if !result.unimportedRules.isEmpty {
+                    _ = await Self.confirm(title: "以下规则无法导入，请手动核对", lines: result.unimportedRules)
+                }
+                submit(result.profile)
             }
-            submit(result.profile)
         } catch {
             lastError = "导入失败：\(error)"
         }
     }
 
     func installLaunchAgent(_ id: String) {
-        guard Self.confirm(title: "接管 \(id) 的启动项", lines: ["停止原启动项并备份", "以后由 AgentGuard 启动器在沙箱内启动"]) else { return }
-        send(.installLaunchAgent(profileID: id))
+        Task {
+            guard await Self.confirm(title: "接管 \(id) 的启动项", lines: ["停止原启动项并备份", "以后由 AgentGuard 启动器在沙箱内启动"]) else { return }
+            send(.installLaunchAgent(profileID: id))
+        }
     }
 
     func removeManagement(_ id: String, restoreOriginal: Bool) {
         let lines = restoreOriginal ? ["停止受管实例", "恢复原启动项：之后将无限制运行"] : ["停止受管实例并移除启动项", "不恢复原启动项"]
-        guard Self.confirm(title: "移除 \(id) 的管控", lines: lines) else { return }
+        Task {
+            guard await Self.confirm(title: "移除 \(id) 的管控", lines: lines) else { return }
+            removeManagementConfirmed(id, restoreOriginal: restoreOriginal)
+        }
+    }
+
+    private func removeManagementConfirmed(_ id: String, restoreOriginal: Bool) {
         Task.detached {
             do {
                 let token = try UserAuthorization.obtain(scope: HelperService.authorizationScope(forRemoval: id), prompt: "AgentGuard 将移除 \(id) 的管控")
@@ -301,7 +311,9 @@ final class AppModel: ObservableObject {
     /// Confirms a change before it is applied. A Knodo import or a broad rule set produces hundreds
     /// of diff lines, so anything longer than a few lines goes into a fixed-size scrollable box
     /// instead of growing the alert until it covers the screen.
-    static func confirm(title: String, lines: [String]) -> Bool {
+    /// It is a sheet on the main window: an app-modal alert floats free of the
+    /// window, can end up behind it, and blocks scrolling and clicks in every window until answered.
+    static func confirm(title: String, lines: [String]) async -> Bool {
         let alert = NSAlert()
         alert.messageText = title
         alert.addButton(withTitle: "确认")
@@ -314,7 +326,16 @@ final class AppModel: ObservableObject {
             alert.accessoryView = DiffTextView(text: text)
         }
         NSApp.activate(ignoringOtherApps: true)
+        if let window = mainWindow {
+            window.makeKeyAndOrderFront(nil)
+            return await alert.beginSheetModal(for: window) == .alertFirstButtonReturn
+        }
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// The SwiftUI `Window(id: "main")`; its NSWindow identifier starts with the scene id.
+    private static var mainWindow: NSWindow? {
+        NSApp.windows.first { $0.isVisible && $0.identifier?.rawValue.hasPrefix("main") == true }
     }
 }
 
