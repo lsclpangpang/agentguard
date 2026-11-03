@@ -23,6 +23,8 @@ let package = Package(
         .executableTarget(name: "GuardHelper", dependencies: ["GuardCore", "GuardPlatform"], swiftSettings: platformSettings),
         .executableTarget(name: "AgentGuardApp", dependencies: ["GuardCore", "GuardPlatform"], swiftSettings: platformSettings),
         .testTarget(name: "GuardCoreTests", dependencies: ["GuardCore"]),
+        // Plain `import GuardCore`: catches APIs the app or CLI use that are not public.
+        .testTarget(name: "GuardCoreAPITests", dependencies: ["GuardCore"]),
         .testTarget(name: "GuardPlatformTests", dependencies: ["GuardPlatform"], swiftSettings: platformSettings),
     ]
 )

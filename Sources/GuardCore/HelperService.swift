@@ -39,6 +39,15 @@ public struct PendingChangeInfo: Codable, Equatable, Sendable {
     public var requiresAuthorization: Bool
     public var baseRevision: Int
     public var expiresAt: Date
+
+    public init(id: String, digest: String, summary: [String], requiresAuthorization: Bool, baseRevision: Int, expiresAt: Date) {
+        self.id = id
+        self.digest = digest
+        self.summary = summary
+        self.requiresAuthorization = requiresAuthorization
+        self.baseRevision = baseRevision
+        self.expiresAt = expiresAt
+    }
 }
 
 public struct ProfileStatusReport: Codable, Equatable, Sendable {
@@ -48,12 +57,26 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var revisionState: RevisionState
     public var runningInstances: [Int]
     public var pendingCount: Int
+
+    public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int) {
+        self.profileID = profileID
+        self.savedRevision = savedRevision
+        self.mode = mode
+        self.revisionState = revisionState
+        self.runningInstances = runningInstances
+        self.pendingCount = pendingCount
+    }
 }
 
 public struct StatusReport: Codable, Equatable, Sendable {
     public var profiles: [ProfileStatusReport]
     /// Empty only while the collector is healthy; an empty list never means "nothing happened".
     public var collectorProblems: [String]
+
+    public init(profiles: [ProfileStatusReport], collectorProblems: [String]) {
+        self.profiles = profiles
+        self.collectorProblems = collectorProblems
+    }
 }
 
 public enum HelperResponse: Codable, Equatable, Sendable {
