@@ -8,41 +8,34 @@ struct ProfileDetailView: View {
 
     var body: some View {
         if let profile = model.profile(profileID) {
-            VStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 14) {
-                    ProfileHeader(profile: profile, status: model.status(for: profileID))
-                    HStack(spacing: 12) {
-                        Text("保护模式").font(.callout.weight(.medium))
-                        Picker("保护模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
-                            Text(Mode.restrictedLearning.displayName).tag(Mode.restrictedLearning)
-                            Text(Mode.enforce.displayName).tag(Mode.enforce)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ProfileHeader(profile: profile, status: model.status(for: profileID))
+                        HStack(spacing: 12) {
+                            Text("保护模式").font(.callout.weight(.medium))
+                            Picker("保护模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
+                                Text(Mode.restrictedLearning.displayName).tag(Mode.restrictedLearning)
+                                Text(Mode.enforce.displayName).tag(Mode.enforce)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(maxWidth: 260)
+                            .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
+                            Spacer(minLength: 0)
                         }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(maxWidth: 260)
-                        .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
-                        Spacer(minLength: 0)
                     }
+                    .padding(.bottom, 4)
+
+                    PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
+                    FilesCard(profile: profile)
+                    TemplatesCard(profile: profile)
+                    ProgramsAndNetworkCard(profile: profile)
+                    if profile.launch != nil { LaunchCard(profile: profile) }
                 }
                 .padding(20)
                 .frame(maxWidth: 900, alignment: .leading)
                 .frame(maxWidth: .infinity)
-
-                Divider()
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
-                        FilesCard(profile: profile)
-                        TemplatesCard(profile: profile)
-                        ProgramsAndNetworkCard(profile: profile)
-                        if profile.launch != nil { LaunchCard(profile: profile) }
-                    }
-                    .padding(20)
-                    .frame(maxWidth: 900, alignment: .leading)
-                    .frame(maxWidth: .infinity)
-                }
-                .clipped()
             }
             .background(Color(nsColor: .windowBackgroundColor))
             .navigationTitle(profileID)

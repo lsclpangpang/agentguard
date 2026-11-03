@@ -328,7 +328,11 @@ final class AppModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         if let window = mainWindow {
             window.makeKeyAndOrderFront(nil)
-            return await alert.beginSheetModal(for: window) == .alertFirstButtonReturn
+            let response = await alert.beginSheetModal(for: window)
+            // When the sheet closes AppKit hands focus to the window's first text field, the port
+            // field near the bottom, and scrolls the detail view down to it.
+            window.makeFirstResponder(nil)
+            return response == .alertFirstButtonReturn
         }
         return alert.runModal() == .alertFirstButtonReturn
     }
