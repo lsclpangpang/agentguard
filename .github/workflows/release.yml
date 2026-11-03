@@ -1,0 +1,58 @@
+name: Release
+
+# Runs only when commits land on main. Protect main so that only reviewed pull requests can land there.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Test
+        run: swift test
+
+      - name: Build AgentGuard.app
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/build-app.sh
+
+      - name: Release tag
+        id: version
+        run: echo "tag=v$(cat VERSION)-build.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentGuard-${{ steps.version.outputs.tag }}
+          path: build/AgentGuard.zip
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: AgentGuard ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          files: build/AgentGuard.zip
+          body: |
+            自动构建，提交 ${{ github.sha }}。尚未完成 M0 能力验证，规则是否在本机真正生效需要手动核对。
+
+            安装：解压后把 AgentGuard.app 拖进“应用程序”，第一次打开前在终端运行（App 没有经过苹果公证）：
+            ```
+            xattr -cr /Applications/AgentGuard.app
+            ```
+            打开 App →“安装 Helper”，在“系统设置 > 通用 > 登录项”中允许，并给 /usr/bin/eslogger 授予“完全磁盘访问”。
+            命令行：`/Applications/AgentGuard.app/Contents/MacOS/guard run <配置档> -- <命令>`
