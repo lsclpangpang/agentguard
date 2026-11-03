@@ -139,19 +139,3 @@ enum Pasteboard {
     }
 }
 #endif
-
-/// A thin material strip along the top edge of a scroll view.
-///
-/// Scrolled content otherwise meets the toolbar — or a notice banner — with a hard cut through
-/// half a line of text. The strip blurs that edge so the boundary reads as chrome; it is invisible
-/// at rest because the content there is padding.
-struct ScrollTopScrim: View {
-    var height: CGFloat = 18
-
-    var body: some View {
-        Rectangle()
-            .fill(.regularMaterial)
-            .frame(height: height)
-            .allowsHitTesting(false)
-    }
-}
