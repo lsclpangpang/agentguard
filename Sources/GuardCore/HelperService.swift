@@ -157,7 +157,11 @@ public final class HelperService {
     private let compiler: PolicyCompiler
     private let renderer: SBPLRenderer
     private let catalog: TemplateCatalog
-    private var trust: CallerTrustPolicy
+    /// 唯一的一份信任表放在台账里：审批（propose/approve/tightening）也要看到重编后的新 cdhash。
+    private var trust: CallerTrustPolicy {
+        get { ledger.trust }
+        set { ledger.trust = newValue }
+    }
     private let verifier: any AuthorizationVerifier
     private let settings: HelperSettings
     /// 启动器 cdhash 的短指纹；由 Helper 在启动时算好传进来（GuardCore 不依赖 CodeSigning）。
@@ -187,7 +191,6 @@ public final class HelperService {
         self.compiler = PolicyCompiler(environment: environment)
         self.renderer = SBPLRenderer(environment: environment)
         self.catalog = catalog
-        self.trust = trust
         self.verifier = verifier
         self.settings = settings
         self.launcherGeneration = launcherGeneration

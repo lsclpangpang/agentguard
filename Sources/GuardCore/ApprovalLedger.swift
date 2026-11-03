@@ -54,6 +54,12 @@ public struct CallerTrustPolicy: Sendable {
         self.identities = identities
     }
 
+    /// 重读签名时某个程序可能正被重编、暂时读不到；这时沿用上一轮的结果，
+    /// 而不是把这个角色从信任表里删掉，让正在处理的合法请求被判 not_trusted。
+    public static func refreshed(_ previous: [CallerRole: CodeIdentity], with fresh: [CallerRole: CodeIdentity]) -> [CallerRole: CodeIdentity] {
+        previous.merging(fresh) { _, new in new }
+    }
+
     public func role(of caller: CallerIdentity) -> CallerRole? {
         guard caller.uid == allowedUID else { return nil }
         return identities.first { $0.value.matches(caller) }?.key
@@ -113,7 +119,8 @@ public enum ApprovalError: Error, Equatable, Sendable {
 /// Two-step change approval: the Helper proposes an exact diff, the user authorizes that exact
 /// change, and the Helper applies it once against the revision it was computed from.
 public struct ApprovalLedger {
-    private let trust: CallerTrustPolicy
+    /// HelperService 重读签名后会改这里；它不另存副本，否则台账会一直用启动时那份信任表。
+    var trust: CallerTrustPolicy
     private let lifetime: TimeInterval
     private let makeID: () -> String
     private var pending: [String: PendingChange] = [:]
