@@ -33,7 +33,9 @@ extension AppModel {
     /// 变更预览 + 确认，必要时要求系统授权。
     func setFileAccess(_ grant: FileGrant, to access: Access, in id: String) {
         guard grant.access != access else { return }
-        edit(id) { profile in
+        // 同一路径的写权限也可能来自运行时模板或状态目录，编译结果取最宽的那条，收回这一条不会生效。
+        let hint = access == .readOnly ? "没有变化：\(grant.path) 的写权限还来自已启用的运行时模板或其他授权，要收回请先停用对应模板" : nil
+        edit(id, unchangedHint: hint) { profile in
             guard let index = profile.files.firstIndex(of: grant) else { return }
             profile.files[index].access = access
         }

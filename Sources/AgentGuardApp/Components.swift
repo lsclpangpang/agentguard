@@ -178,7 +178,6 @@ struct ConfirmationSheet: View {
         .frame(width: 660)
     }
 }
-#endif
 
 /// 单条文件授权的读写级别。做成两段式胶囊而不是菜单：`Menu` 的 label 会被 AppKit 换掉，
 /// 自定义底色和前景色都留不住，看起来就是两行裸文字；两段式还能一眼看出“可切换”。
@@ -222,6 +221,10 @@ struct AccessControl: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .onHover { hover = $0 ? value : nil }
+        // 从一段直接滑到另一段时，旧段的离开事件可能晚于新段的进入，只清掉自己的高亮。
+        .onHover { inside in
+            if inside { hover = value } else if hover == value { hover = nil }
+        }
     }
 }
+#endif
