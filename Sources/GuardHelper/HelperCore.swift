@@ -38,14 +38,18 @@ final class HelperCore {
         return identities
     }
 
-    /// Re-pins the bundled binaries when they were rebuilt. `true` means the trust set changed.
+    /// Re-pins the bundled binaries whenever a connection arrives.
+    ///
+    /// 每次都同步给 HelperService，而不是只在 cdhash 变化时同步：这个 daemon 会连续运行几天，
+    /// 期间 App 可能被重编十几次；只要有一轮信任表没跟上，合法调用者就会被判成 not_trusted
+    /// （现象是界面一切正常、只有改权限时静默失败）。`true` 表示 cdhash 确实变了。
     @discardableResult
     func refreshIdentitiesIfChanged() -> Bool {
         let fresh = Self.readIdentities(bundleMacOSDirectory: bundleMacOSDirectory)
-        guard fresh != identities else { return false }
+        let changed = fresh != identities
         identities = fresh
         service?.updateIdentities(fresh)
-        return true
+        return changed
     }
 
     /// Only connections from our own bundle's binaries get past XPC.
