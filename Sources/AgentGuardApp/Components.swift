@@ -104,7 +104,7 @@ struct PathLabel: View {
         let url = URL(fileURLWithPath: path)
         let parent = url.deletingLastPathComponent().path
         VStack(alignment: .leading, spacing: 1) {
-            Text(url.lastPathComponent.isEmpty ? path : url.lastPathComponent).font(.body)
+            Text(url.lastPathComponent.isEmpty ? path : url.lastPathComponent).font(.body).lineLimit(1).truncationMode(.middle)
             Text(Self.abbreviate(parent)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }
         .help(path)
@@ -129,25 +129,6 @@ struct IconTile: View {
             .foregroundStyle(tint)
             .frame(width: size, height: size)
             .background(RoundedRectangle(cornerRadius: size * 0.28, style: .continuous).fill(tint.opacity(0.14)))
-    }
-}
-
-/// Row shell with a hover-revealed trailing action.
-struct HoverRow<Leading: View, Trailing: View>: View {
-    @ViewBuilder var leading: () -> Leading
-    @ViewBuilder var trailing: () -> Trailing
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 10) {
-            leading()
-            Spacer(minLength: 8)
-            trailing().opacity(hovering ? 1 : 0.0001)
-        }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 8)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Color.primary.opacity(0.05) : .clear))
-        .onHover { hovering = $0 }
     }
 }
 

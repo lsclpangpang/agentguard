@@ -143,29 +143,43 @@ private struct FilesCard: View {
                 VStack(spacing: 0) {
                     ForEach(Array(profile.files.enumerated()), id: \.offset) { index, grant in
                         if index > 0 { Divider().padding(.leading, 46) }
-                        HoverRow {
-                            IconTile(systemImage: grant.kind == .directory ? "folder.fill" : "doc.fill",
-                                     tint: grant.access == .readWrite ? .orange : .blue)
-                            PathLabel(path: grant.path)
-                        } trailing: {
-                            Button(role: .destructive) { model.removeFile(grant, from: profile.id) } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("移除")
-                        }
-                        .overlay(alignment: .trailing) {
-                            HStack(spacing: 6) {
-                                if grant.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
-                                Chip(text: grant.access == .readWrite ? "读写" : "只读", tint: grant.access == .readWrite ? .orange : .blue)
-                            }
-                            .padding(.trailing, 40)
-                            .allowsHitTesting(false)
-                        }
+                        FileRow(grant: grant) { model.removeFile(grant, from: profile.id) }
                     }
                 }
             }
         }
+    }
+}
+
+/// Path on the left, labels and the hover-revealed remove button on the right, laid out side by side
+/// so a long path is truncated instead of being covered.
+private struct FileRow: View {
+    let grant: FileGrant
+    let remove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            IconTile(systemImage: grant.kind == .directory ? "folder.fill" : "doc.fill",
+                     tint: grant.access == .readWrite ? .orange : .blue)
+            PathLabel(path: grant.path)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+            HStack(spacing: 6) {
+                if grant.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
+                Chip(text: grant.access == .readWrite ? "读写" : "只读", tint: grant.access == .readWrite ? .orange : .blue)
+            }
+            .fixedSize()
+            Button(role: .destructive, action: remove) { Image(systemName: "trash") }
+                .buttonStyle(.borderless)
+                .help("移除")
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Color.primary.opacity(0.05) : .clear))
+        .onHover { hovering = $0 }
     }
 }
 
