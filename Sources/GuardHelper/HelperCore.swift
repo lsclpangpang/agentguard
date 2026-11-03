@@ -110,7 +110,8 @@ final class HelperCore {
             store: config.store, environment: config.environment, catalog: TemplateCatalog(config.templates),
             trust: CallerTrustPolicy(allowedUID: record.uid, identities: identities),
             verifier: SystemAuthorizationVerifier(), settings: config.helperSettings,
-            clock: Date.init, makeID: { UUID().uuidString.lowercased() }
+            clock: Date.init, makeID: { UUID().uuidString.lowercased() },
+            launcherGeneration: (try? CodeSigning.cdhash(atPath: config.helperSettings.launcherPath)).map { String($0.prefix(8)) } ?? ""
         )
         service?.onAcknowledgeCollectorProblems = { [weak self] in
             guard let self else { return }
@@ -130,7 +131,8 @@ final class HelperCore {
         case .applied:
             refreshCollector()
         case let .launchAgent(label, originalLabel, plist):
-            if !installLaunchAgent(label: label, originalLabel: originalLabel, plist: plist, config: config, owner: owner) {
+            guard case let .installLaunchAgent(profileID) = request else { return response }
+            if !installLaunchAgent(label: label, profileID: profileID, originalLabel: originalLabel, plist: plist, config: config, owner: owner) {
                 return .failure(code: "launchctl_failed")
             }
         case let .restartManaged(label, originalLabel, plist, pids):
@@ -148,7 +150,8 @@ final class HelperCore {
                 return .failure(code: "launchctl_failed")
             }
         case let .removal(label, restoreOriginalLabel):
-            removeLaunchAgent(label: label, restore: restoreOriginalLabel, config: config, owner: owner)
+            guard case let .removeManagement(profileID, _, _) = request else { return response }
+            removeLaunchAgent(label: label, profileID: profileID, restore: restoreOriginalLabel, config: config, owner: owner)
         default:
             break
         }
@@ -163,7 +166,7 @@ final class HelperCore {
         }
     }
 
-    private func installLaunchAgent(label: String, originalLabel: String?, plist: Data, config: AgentGuardConfig, owner: OwnerRecord) -> Bool {
+    private func installLaunchAgent(label: String, profileID: String, originalLabel: String?, plist: Data, config: AgentGuardConfig, owner: OwnerRecord) -> Bool {
         let path = "/Library/LaunchAgents/\(label).plist"
         do {
             try plist.write(to: URL(fileURLWithPath: path), options: .atomic)
@@ -183,13 +186,28 @@ final class HelperCore {
             }
         }
         _ = Launchctl.run(["bootout", "\(domain)/\(label)"])
+        // 换过 label（启动器重编 → 指纹变）之后，旧 plist 还留在 /Library/LaunchAgents 里，
+        // 留着就是重复实例或永久失效的 EX_CONFIG 任务，这里顺手清干净。
+        removeStaleLaunchAgents(except: label, profileID: profileID, domain: domain)
         return Launchctl.run(["bootstrap", domain, path]) == 0
     }
 
-    private func removeLaunchAgent(label: String, restore originalLabel: String?, config: AgentGuardConfig, owner: OwnerRecord) {
+    private func removeStaleLaunchAgents(except keep: String, profileID: String, domain: String) {
+        let prefix = AgentGuardConfig.labelPrefix + "." + profileID
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/Library/LaunchAgents") else { return }
+        for entry in entries where entry.hasPrefix(prefix) && entry.hasSuffix(".plist") {
+            let label = String(entry.dropLast(6))
+            guard label != keep else { continue }
+            _ = Launchctl.run(["bootout", "\(domain)/\(label)"])
+            try? FileManager.default.removeItem(atPath: "/Library/LaunchAgents/\(entry)")
+        }
+    }
+
+    private func removeLaunchAgent(label: String, profileID: String, restore originalLabel: String?, config: AgentGuardConfig, owner: OwnerRecord) {
         let domain = "gui/\(owner.uid)"
         _ = Launchctl.run(["bootout", "\(domain)/\(label)"])
         try? FileManager.default.removeItem(atPath: "/Library/LaunchAgents/\(label).plist")
+        removeStaleLaunchAgents(except: "", profileID: profileID, domain: domain)
         guard let originalLabel else { return }
         let backup = config.configRoot + "/backups/\(originalLabel).plist"
         guard let location = try? String(contentsOfFile: backup + ".location", encoding: .utf8), FileManager.default.fileExists(atPath: backup) else { return }

@@ -148,6 +148,8 @@ public final class HelperService {
     private var trust: CallerTrustPolicy
     private let verifier: any AuthorizationVerifier
     private let settings: HelperSettings
+    /// 启动器 cdhash 的短指纹；由 Helper 在启动时算好传进来（GuardCore 不依赖 CodeSigning）。
+    private let launcherGeneration: String
     private let clock: () -> Date
     private var ledger: ApprovalLedger
     private var tracker = InstanceTracker()
@@ -162,7 +164,8 @@ public final class HelperService {
     public var onAcknowledgeCollectorProblems: (() -> Void)?
 
     public init(store: ProfileStore, environment: CompileEnvironment, catalog: TemplateCatalog, trust: CallerTrustPolicy,
-                verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String) {
+                verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String,
+                launcherGeneration: String = "") {
         self.store = store
         self.environment = environment
         self.compiler = PolicyCompiler(environment: environment)
@@ -171,6 +174,7 @@ public final class HelperService {
         self.trust = trust
         self.verifier = verifier
         self.settings = settings
+        self.launcherGeneration = launcherGeneration
         self.clock = clock
         self.ledger = ApprovalLedger(trust: trust, makeID: makeID)
     }
@@ -342,9 +346,13 @@ public final class HelperService {
     private func launchDefinition(_ profileID: String) throws -> (LaunchAgentDefinition, LaunchSettings) {
         guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
         guard let launch = latest.launch else { throw Failure(code: "no_launch_settings") }
+        // 启动器每次重编都会重签，把它的 cdhash 前 8 位带进 label：launchd 的 BTM 记录按 label
+        // 缓存 LWCR，不换 label 的话重编后任务会以 EX_CONFIG(78) 起不来。
+        let fingerprint = launcherGeneration
         let definition = LaunchAgentDefinition(labelPrefix: settings.labelPrefix, launcherPath: settings.launcherPath, profileID: profileID,
                                                runAtLoad: true, restartOnCleanExit: launch.restartOnCleanExit,
-                                               throttleInterval: settings.throttleInterval, logDirectory: settings.logDirectory)
+                                               throttleInterval: settings.throttleInterval, logDirectory: settings.logDirectory,
+                                               generation: fingerprint)
         return (definition, launch)
     }
 

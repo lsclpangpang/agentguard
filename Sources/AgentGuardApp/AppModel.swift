@@ -262,8 +262,8 @@ final class AppModel: ObservableObject {
     /// 改完规则后旧进程还在按老沙箱跑，重启后新修订才算生效。
     func restartManaged(_ id: String) {
         Task {
-            guard await askConfirmation("重启 \(id) 的受管实例",
-                                        ["结束当前实例的进程", "按已保存的修订重新启动"]) else { return }
+            guard await Self.confirm(title: "重启 \(id) 的受管实例",
+                                     lines: ["结束当前实例的进程", "按已保存的修订重新启动"]) else { return }
             send(.restartManagedInstance(profileID: id))
         }
     }

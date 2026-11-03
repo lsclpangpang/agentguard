@@ -14,6 +14,7 @@ public enum PlatformError: Error, CustomStringConvertible {
     case signing(String)
     case authorization(Int32)
     case notFound(String)
+    case notExecutable(String)
 
     public var description: String {
         switch self {
@@ -24,6 +25,7 @@ public enum PlatformError: Error, CustomStringConvertible {
         case let .signing(message): return "签名校验失败：\(message)"
         case let .authorization(status): return "系统认证未完成（\(status)）"
         case let .notFound(what): return "找不到 \(what)"
+        case let .notExecutable(path): return "\(path) 不是可执行文件（缺少执行权限）"
         }
     }
 }
@@ -53,7 +55,13 @@ public enum Exec {
     /// Replaces the current process with the plan's target. Only returns by throwing.
     public static func replaceProcess(with plan: LaunchPlan) throws -> Never {
         let searchPath = plan.environment["PATH"] ?? LaunchPlan.defaultPath
-        guard let path = resolve(plan.executable, searchPath: searchPath) else { throw PlatformError.notFound(plan.executable) }
+        guard let path = resolve(plan.executable, searchPath: searchPath) else {
+            // 文件在、但没有执行位时，说“找不到”会把人带偏；这条错误此前就误导过一次排查。
+            if FileManager.default.fileExists(atPath: plan.executable) {
+                throw PlatformError.notExecutable(plan.executable)
+            }
+            throw PlatformError.notFound(plan.executable)
+        }
         guard chdir(plan.workingDirectory) == 0 else { throw PlatformError.exec(plan.workingDirectory, errno) }
         if plan.stdinFromNull {
             let fd = open("/dev/null", O_RDONLY)
