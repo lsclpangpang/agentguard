@@ -245,10 +245,16 @@ final class AppModel: ObservableObject {
     }
 
     func addProgram(to id: String) {
-        guard let path = chooseExecutable() else { return }
+        guard let path = chooseExecutable() else {
+            // 面板关掉后 AppKit 会把焦点还给窗口里的第一个文本框——也就是「受管程序」的
+            // 路径输入框，SwiftUI 随即滚动过去，界面看起来就是“飘”了一下。
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            return
+        }
         edit(id) { profile in
             if !profile.programs.contains(path) { profile.programs.append(path) }
         }
+        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     func removeProgram(_ path: String, from id: String) {

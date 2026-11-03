@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import Foundation
 import GuardCore
 
@@ -53,6 +54,8 @@ extension AppModel {
         edit(id) { profile in
             if !profile.programs.contains(expanded) { profile.programs.append(expanded) }
         }
+        // 提交后把焦点还回去，避免下一次窗口重新激活时 SwiftUI 为了露出这个输入框而滚动。
+        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     func setTemplate(_ template: Template, enabled: Bool, in id: String) {
