@@ -248,7 +248,9 @@ public final class HelperService {
     public func handle(_ request: HelperRequest, caller: CallerIdentity, process: ProcessKey) -> HelperResponse {
         var caller = caller
         caller.managedInstance = tracker.owner(of: process)
-        if caller.managedInstance != nil { return .failure(code: "managed_caller") }
+        // 受管对象里的进程不能反过来操控权限；但“上报自己被装进了沙箱”正是启动器
+        // 该做的事——它注册完自己就已经是实例根进程，不豁免的话这条永远发不进来。
+        if caller.managedInstance != nil, !isSelfReport(request) { return .failure(code: "managed_caller") }
         guard let role = trust.role(of: caller) else {
             let known = trust.identities
                 .map { "\($0.key)=\($0.value.cdhashes.sorted().joined(separator: "|"))" }
@@ -309,6 +311,11 @@ public final class HelperService {
         } catch {
             return .failure(code: "internal_error")
         }
+    }
+
+    private func isSelfReport(_ request: HelperRequest) -> Bool {
+        if case .reportVerification = request { return true }
+        return false
     }
 
     private struct Failure: Error {
