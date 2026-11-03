@@ -13,8 +13,13 @@ struct Card<Content: View, Accessory: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(title, systemImage: systemImage).font(.headline)
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: 22, height: 22)
+                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.accentColor.opacity(0.12)))
+                Text(title).font(.headline)
                 Spacer()
                 accessory()
             }
@@ -25,8 +30,12 @@ struct Card<Content: View, Accessory: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.quaternary))
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.05), radius: 3, y: 1)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color(nsColor: .separatorColor).opacity(0.6)))
     }
 }
 
@@ -145,37 +154,82 @@ struct ConfirmationSheet: View {
     let pending: PendingConfirmation
     let answer: (Bool) -> Void
 
-    private var text: String { pending.lines.joined(separator: "\n") }
+    private var needsScroll: Bool { pending.lines.count > 8 }
 
-    private var needsScroll: Bool { pending.lines.count > 8 || text.count > 480 }
+    /// 差异摘要以 “+ / - / ~ ” 开头；按这个前缀上色，一眼分出新增、收回和修改。
+    private var isDiff: Bool { pending.lines.contains { DiffLine.marker(of: $0) != nil } }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(pending.title).font(.headline)
-            if needsScroll {
-                Text("共 \(pending.lines.count) 行变更，滚动查看全部内容。")
-                    .font(.callout).foregroundStyle(.secondary)
-                ScrollView {
-                    Text(text)
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                IconTile(systemImage: isDiff ? "shield.lefthalf.filled" : "questionmark.circle.fill", tint: .accentColor, size: 36)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pending.title).font(.headline)
+                    if needsScroll {
+                        Text("共 \(pending.lines.count) 项，滚动查看全部").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
-                .frame(height: 320)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
-            } else if !text.isEmpty {
-                Text(text).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+            if !pending.lines.isEmpty {
+                Group {
+                    if needsScroll {
+                        ScrollView { lines }.frame(height: 300)
+                    } else {
+                        lines
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(nsColor: .textBackgroundColor).opacity(0.6)))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.quaternary))
             }
             HStack {
+                Button("复制") { Pasteboard.copy(pending.lines.joined(separator: "\n")) }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("复制全部内容")
                 Spacer()
-                Button("取消") { answer(false) }.keyboardShortcut(.cancelAction)
-                Button("确认") { answer(true) }.keyboardShortcut(.defaultAction)
+                Button("取消") { answer(false) }.keyboardShortcut(.cancelAction).controlSize(.large)
+                Button("确认") { answer(true) }.keyboardShortcut(.defaultAction).controlSize(.large)
             }
         }
-        .padding(20)
-        .frame(width: 660)
+        .padding(22)
+        .frame(width: 600)
+    }
+
+    private var lines: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(pending.lines.enumerated()), id: \.offset) { index, line in
+                if index > 0 { Divider().opacity(0.5) }
+                DiffLine(line: line)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+    }
+}
+
+private struct DiffLine: View {
+    let line: String
+
+    static func marker(of line: String) -> (symbol: String, tint: Color)? {
+        if line.hasPrefix("+ ") { return ("plus.circle.fill", .orange) }
+        if line.hasPrefix("- ") { return ("minus.circle.fill", .green) }
+        if line.hasPrefix("~ ") { return ("arrow.left.arrow.right.circle.fill", .blue) }
+        return nil
+    }
+
+    var body: some View {
+        let marker = Self.marker(of: line)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: marker?.symbol ?? "circle.fill")
+                .font(.system(size: marker == nil ? 5 : 12))
+                .foregroundStyle(marker?.tint ?? .secondary)
+                .frame(width: 14)
+            Text(marker == nil ? line : String(line.dropFirst(2)))
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
     }
 }
 
