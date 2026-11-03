@@ -56,6 +56,14 @@ struct MainWindow: View {
                 ForEach(model.report?.profiles ?? [], id: \.profileID) { profile in
                     SidebarRow(profile: profile)
                         .tag(profile.profileID)
+                        .contextMenu {
+                            if model.profile(profile.profileID)?.launch?.originalLabel != nil {
+                                Button("删除并恢复原启动项…", role: .destructive) { model.deleteProfile(profile.profileID, restoreOriginal: true) }
+                                    .disabled(!profile.runningInstances.isEmpty)
+                            }
+                            Button("删除配置档…", role: .destructive) { model.deleteProfile(profile.profileID) }
+                                .disabled(!profile.runningInstances.isEmpty)
+                        }
                         .badge(profile.pendingCount)
                 }
             }
@@ -212,9 +220,20 @@ struct NewProfileSheet: View {
     @Binding var isPresented: Bool
     @State private var name = ""
     @State private var selected: Set<String> = ["system-base"]
+    @State private var program: String?
+    @State private var runsInBackground = false
+    @State private var arguments = ""
+    @State private var originalLabel = ""
 
     private var nameIsValid: Bool { ProfileID.isValid(name) }
     private var nameTaken: Bool { model.report?.profiles.contains { $0.profileID == name } ?? false }
+
+    private var launch: LaunchSettings? {
+        guard runsInBackground, let program else { return nil }
+        let label = originalLabel.trimmingCharacters(in: .whitespaces)
+        return LaunchSettings(executable: program, arguments: arguments.split(separator: " ").map(String.init), workingDirectory: nil,
+                              originalLabel: label.isEmpty ? nil : label, restartOnCleanExit: false)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -242,6 +261,35 @@ struct NewProfileSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
+                Text("要管控的程序").font(.headline)
+                HStack(spacing: 8) {
+                    if let program {
+                        PathLabel(path: program).frame(maxWidth: .infinity, alignment: .leading)
+                        Button("更换…") { self.program = model.chooseExecutable() ?? program }
+                        Button { self.program = nil } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.borderless).foregroundStyle(.secondary).help("不指定程序")
+                    } else {
+                        Text("可选。指定后，没有经过 AgentGuard 直接运行它会被报告。").font(.callout).foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        Button("选择…") { program = model.chooseExecutable() }
+                    }
+                }
+                if program != nil {
+                    Picker("启动方式", selection: $runsInBackground) {
+                        Text("命令行工具（guard run）").tag(false)
+                        Text("后台程序（接管启动项）").tag(true)
+                    }
+                    .pickerStyle(.radioGroup)
+                    if runsInBackground {
+                        TextField("启动参数（可选，空格分隔）", text: $arguments).textFieldStyle(.roundedBorder)
+                        TextField("要替换的原启动项 label（可选），例如 com.example.agent", text: $originalLabel).textFieldStyle(.roundedBorder)
+                        Text("创建后在配置档的“启动项”里点“接管启动项”，以后由 AgentGuard 在沙箱内启动它。程序需要在前台运行，不要自己转到后台。")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
                 Text("运行时模板").font(.headline)
                 ForEach(model.templates, id: \.id) { template in
                     let info = TemplateInfo.of(template.id)
@@ -264,7 +312,7 @@ struct NewProfileSheet: View {
                 Spacer()
                 Button("取消") { isPresented = false }.keyboardShortcut(.cancelAction)
                 Button("创建") {
-                    model.createProfile(id: name, templateIDs: selected)
+                    model.createProfile(id: name, templateIDs: selected, program: program, launch: launch)
                     isPresented = false
                 }
                 .keyboardShortcut(.defaultAction)

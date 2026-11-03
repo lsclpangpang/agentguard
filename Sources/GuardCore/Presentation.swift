@@ -14,6 +14,7 @@ public enum HelperFailure {
         case "unknown_change", "already_used", "expired", "digest_mismatch": return "这次批准已失效，请重新提交"
         case "no_launch_settings": return "配置档没有启动设置，不能接管启动项"
         case "invalid_profile": return "配置档名称无效"
+        case "profile_running": return "配置档还有运行中的实例，请先停止它再删除"
         default: return "Helper 拒绝了请求（\(code)）"
         }
     }

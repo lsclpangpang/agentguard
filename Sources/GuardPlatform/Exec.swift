@@ -100,4 +100,26 @@ public enum ProcessFacts {
         return nil
         #endif
     }
+
+    /// Every process whose executable path can be read. A listing has no audit-token version, so
+    /// keys carry version 0 and ownership has to be matched by PID.
+    public static func allProcesses() -> [RunningProcess] {
+        #if canImport(Darwin)
+        let capacity = proc_listallpids(nil, 0)
+        guard capacity > 0 else { return [] }
+        var pids = [pid_t](repeating: 0, count: Int(capacity) + 64)
+        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        guard count > 0 else { return [] }
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        return pids.prefix(Int(count)).compactMap { pid in
+            guard pid > 0, proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            let parent = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size ? Int32(bitPattern: info.pbi_ppid) : nil
+            return RunningProcess(key: ProcessKey(pid: pid, version: 0), executablePath: String(cString: buffer), parentPID: parent)
+        }
+        #else
+        return []
+        #endif
+    }
 }

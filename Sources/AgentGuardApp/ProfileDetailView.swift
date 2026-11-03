@@ -28,10 +28,12 @@ struct ProfileDetailView: View {
                     .padding(.bottom, 4)
 
                     PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
+                    ManagedProgramsCard(profile: profile, unmanaged: model.status(for: profileID)?.unmanagedProcesses ?? [])
                     FilesCard(profile: profile)
                     TemplatesCard(profile: profile)
                     ProgramsAndNetworkCard(profile: profile)
                     if profile.launch != nil { LaunchCard(profile: profile) }
+                    DeleteCard(profile: profile, running: !(model.status(for: profileID)?.runningInstances.isEmpty ?? true))
                 }
                 .padding(20)
                 .frame(maxWidth: 900, alignment: .leading)
@@ -100,6 +102,9 @@ private struct ProfileHeader: View {
             }
             if !status.detachedInstances.isEmpty {
                 Chip(text: "已脱离 launchd 看护", systemImage: "exclamationmark.triangle.fill", tint: .orange)
+            }
+            if !status.unmanagedProcesses.isEmpty {
+                Chip(text: "\(status.unmanagedProcesses.count) 个未受管进程", systemImage: "exclamationmark.octagon.fill", tint: .red)
             }
         }
     }
@@ -254,6 +259,93 @@ private struct TemplateTile: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The executables this profile manages, and copies of them found running outside AgentGuard.
+private struct ManagedProgramsCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+    let unmanaged: [Int32]
+
+    var body: some View {
+        Card(title: "受管程序", systemImage: "app.badge.checkmark",
+             subtitle: "这个配置档管控的可执行文件，会自动获得读取和执行权限。不经过 AgentGuard 直接运行的副本不受沙箱限制，会在这里报告。") {
+            Button { model.addProgram(to: profile.id) } label: { Label("添加", systemImage: "plus") }
+                .buttonStyle(.borderless)
+        } content: {
+            VStack(alignment: .leading, spacing: 10) {
+                if !unmanaged.isEmpty {
+                    Notice(kind: .error,
+                           text: "发现 \(unmanaged.count) 个没有经过 AgentGuard 启动的进程（PID \(unmanaged.map(String.init).joined(separator: "、"))），它们不受沙箱限制。请结束这些进程，改用 guard run \(profile.id) -- <命令> 或接管启动项来启动。")
+                }
+                Text("如果程序是脚本（例如 npm 安装的 claude），实际运行的是解释器，直接运行它不会被检测到。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if profile.programs.isEmpty {
+                    Text(profile.launch == nil
+                         ? "还没有指定程序。指定后，直接运行它（没有经过 guard run）会被报告。"
+                         : "启动项的入口程序会被检测；如果入口是脚本，请把它实际启动的程序也加进来。")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(profile.programs.enumerated()), id: \.offset) { index, path in
+                            if index > 0 { Divider().padding(.leading, 46) }
+                            ProgramRow(path: path) { model.removeProgram(path, from: profile.id) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ProgramRow: View {
+    let path: String
+    let remove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            IconTile(systemImage: "terminal.fill", tint: .indigo)
+            PathLabel(path: path)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+            Button(role: .destructive, action: remove) { Image(systemName: "trash") }
+                .buttonStyle(.borderless)
+                .help("不再管控这个程序")
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Color.primary.opacity(0.05) : .clear))
+        .onHover { hovering = $0 }
+    }
+}
+
+private struct DeleteCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+    let running: Bool
+
+    var body: some View {
+        Card(title: "删除配置档", systemImage: "trash",
+             subtitle: "删除全部权限设置和 AgentGuard 安装的启动项，名称可以重新使用。已批准的历史修订和它的状态目录会归档到只有 root 能访问的位置。") {
+            HStack(spacing: 12) {
+                if profile.launch?.originalLabel != nil {
+                    Button("删除并恢复原启动项…", role: .destructive) { model.deleteProfile(profile.id, restoreOriginal: true) }
+                        .disabled(running)
+                    Button("删除，不恢复…", role: .destructive) { model.deleteProfile(profile.id) }
+                        .disabled(running)
+                } else {
+                    Button("删除配置档…", role: .destructive) { model.deleteProfile(profile.id) }
+                        .disabled(running)
+                }
+                if running {
+                    Text("还有运行中的实例，先停止它再删除").font(.callout).foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }
 

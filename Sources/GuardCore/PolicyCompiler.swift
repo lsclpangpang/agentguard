@@ -40,6 +40,8 @@ public enum CompileError: Error, Equatable, Sendable {
     case invalidHash(String)
     case conflictingHashes(String)
     case mutableExecutableWithoutHash(String)
+    /// The Helper uses the original label in root-owned file paths and launchctl calls.
+    case invalidLaunchLabel(String)
 }
 
 public struct EffectiveFileGrant: Hashable, Sendable {
@@ -77,6 +79,14 @@ public struct EffectivePolicy: Hashable, Sendable {
     public var extraRules: [String]
     public var stateDirectory: String?
     public var launch: LaunchSettings?
+    /// Canonical, sorted, unique `Profile.programs`.
+    public var programs: [String] = []
+
+    /// Executables whose copies running outside AgentGuard count as unmanaged: the programs plus the
+    /// launch executable.
+    public var detectionTargets: [String] {
+        Array(Set(programs + (launch.map { [$0.executable] } ?? []))).sorted()
+    }
 }
 
 public enum ProfileID {
@@ -103,18 +113,23 @@ public struct PolicyCompiler: Sendable {
         var files = try compileFiles(profile.files + templates.flatMap(\.files) + (stateGrant.map { [$0] } ?? []))
         var launch = profile.launch
         if let settings = launch {
-            let executable = try canonical(settings.executable)
-            launch?.executable = executable.value
-            // The launcher must be able to read the target it execs.
+            launch?.executable = try canonical(settings.executable).value
+            if let label = settings.originalLabel, !Self.isSafeLaunchLabel(label) { throw CompileError.invalidLaunchLabel(label) }
+        }
+        let programs = Array(Set(try profile.programs.map { try canonical($0).value })).sorted()
+        // The launcher and `guard run` apply the sandbox before exec, so every target they start must
+        // be readable and executable inside it.
+        let targets = (launch.map { [$0.executable] } ?? []) + programs
+        for target in targets {
+            let executable = try canonical(target)
             if !files.contains(where: { $0.kind == .directory ? $0.path.contains(executable, caseInsensitive: caseInsensitive) : $0.path.isSame(as: executable, caseInsensitive: caseInsensitive) }) {
                 files.append(CanonicalFileGrant(path: executable, kind: .file, access: .readOnly, readsSecrets: false))
                 files.sort { $0.path.value < $1.path.value }
                 try validateProtected(files)
             }
         }
-        // The launcher applies the sandbox before exec, so the target itself must be executable.
-        let launchExec = launch.map { [ExecGrant(path: $0.executable)] } ?? []
-        let exec = try compileExec(profile.exec + templates.flatMap(\.exec) + launchExec, files: files)
+        let targetExec = targets.map { ExecGrant(path: $0) }
+        let exec = try compileExec(profile.exec + templates.flatMap(\.exec) + targetExec, files: files)
         var network = profile.network
         network.loopbackTCPConnect = try compilePorts(profile.network.loopbackTCPConnect + templates.flatMap(\.loopbackPorts))
         return EffectivePolicy(
@@ -127,8 +142,18 @@ public struct PolicyCompiler: Sendable {
             unrestrictedExec: profile.unrestrictedExec,
             extraRules: try compileRawRules(profile.extraRules),
             stateDirectory: try stateDirectory.map { try canonical($0).value },
-            launch: launch
+            launch: launch,
+            programs: programs
         )
+    }
+
+    /// Reverse-DNS style, so it is safe as a path component and a launchctl target, and never one of ours.
+    static func isSafeLaunchLabel(_ label: String) -> Bool {
+        func isAlphanumeric(_ c: Unicode.Scalar) -> Bool { ("a"..."z").contains(c) || ("A"..."Z").contains(c) || ("0"..."9").contains(c) }
+        guard let first = label.unicodeScalars.first, isAlphanumeric(first), label.count <= 255, !label.contains(".."),
+              !label.hasPrefix(AgentGuardConfig.bundleIdentifier)
+        else { return false }
+        return label.unicodeScalars.allSatisfy { isAlphanumeric($0) || "._-".unicodeScalars.contains($0) }
     }
 
     private func compileRawRules(_ rules: [String]) throws -> [String] {

@@ -23,7 +23,7 @@ import Testing
         #expect(diff.summaryLines == [
             "- 只读文件 /Library/Application Support/AgentGuard Releases/knodo/knodo-agentd",
             "+ 只读文件 /Users/me/evil",
-            "~ 启动程序：/Users/me/evil run",
+            "~ 启动程序：/Users/me/evil run（替换原启动项 com.knodo.local-agent）",
             "- 可执行 /Library/Application Support/AgentGuard Releases/knodo/knodo-agentd",
             "+ 可执行 /Users/me/evil",
         ])

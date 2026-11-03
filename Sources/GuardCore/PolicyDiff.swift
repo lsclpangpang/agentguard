@@ -17,6 +17,8 @@ public enum PolicyChange: Hashable, Sendable {
     case extraRuleAdded(String)
     case extraRuleRemoved(String)
     case launchChanged(to: LaunchSettings?)
+    case programAdded(String)
+    case programRemoved(String)
 
     /// Whether this change gives the managed software more capability than before.
     public var expands: Bool {
@@ -24,6 +26,8 @@ public enum PolicyChange: Hashable, Sendable {
         case let .modeChanged(from, to): return !from.liftsBoundary && to.liftsBoundary
         case .fileAdded, .execAdded, .loopbackPortAdded, .extraRuleAdded: return true
         case .fileRemoved, .execRemoved, .loopbackPortRemoved, .fileSecretsFlagChanged, .extraRuleRemoved: return false
+        // Only marks what to watch; the program's exec and read grants carry the widening.
+        case .programAdded, .programRemoved: return false
         case let .unrestrictedExecChanged(to): return to
         case let .launchChanged(to): return to != nil
         case let .fileAccessChanged(_, _, to): return to == .readWrite
@@ -43,6 +47,9 @@ public struct PolicyDiff: Hashable, Sendable {
         if old.mode != new.mode { changes.append(.modeChanged(from: old.mode, to: new.mode)) }
         changes += Self.fileChanges(old.files, new.files)
         if old.launch != new.launch { changes.append(.launchChanged(to: new.launch)) }
+        let oldPrograms = Set(old.programs), newPrograms = Set(new.programs)
+        changes += newPrograms.subtracting(oldPrograms).sorted().map(PolicyChange.programAdded)
+        changes += oldPrograms.subtracting(newPrograms).sorted().map(PolicyChange.programRemoved)
         if old.unrestrictedExec != new.unrestrictedExec { changes.append(.unrestrictedExecChanged(to: new.unrestrictedExec)) }
         changes += Self.execChanges(old.exec, new.exec)
         let oldPorts = Set(old.network.loopbackTCPConnect), newPorts = Set(new.network.loopbackTCPConnect)
@@ -120,6 +127,8 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .launchChanged(to):
             guard let to else { return "launch|-" }
             return "launch|\(to.executable)|\(to.arguments.joined(separator: "\u{1f}"))|\(to.workingDirectory ?? "-")|\(to.originalLabel ?? "-")|\(to.restartOnCleanExit)"
+        case let .programAdded(path): return "program+|\(path)"
+        case let .programRemoved(path): return "program-|\(path)"
         }
     }
 
@@ -166,7 +175,9 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .extraRuleRemoved(rule): return "- 原样规则 \(rule)"
         case let .launchChanged(to):
             guard let to else { return "- 启动程序" }
-            return "~ 启动程序：" + ([to.executable] + to.arguments).joined(separator: " ")
+            return "~ 启动程序：" + ([to.executable] + to.arguments).joined(separator: " ") + (to.originalLabel.map { "（替换原启动项 \($0)）" } ?? "")
+        case let .programAdded(path): return "+ 受管程序 \(path)"
+        case let .programRemoved(path): return "- 受管程序 \(path)"
         }
     }
 }

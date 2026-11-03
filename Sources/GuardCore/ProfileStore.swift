@@ -5,6 +5,8 @@ public protocol FileStore: Sendable {
     func writeAtomically(_ data: Data, to path: String) throws
     /// Names of entries directly inside `directory`, sorted; empty when it does not exist.
     func list(_ directory: String) throws -> [String]
+    /// Moves a file or directory; the destination's parent is created if needed.
+    func move(_ source: String, to destination: String) throws
 }
 
 public final class InMemoryFileStore: FileStore, @unchecked Sendable {
@@ -29,6 +31,17 @@ public final class InMemoryFileStore: FileStore, @unchecked Sendable {
         let names = files.keys.filter { $0.hasPrefix(prefix) }.compactMap { $0.dropFirst(prefix.count).split(separator: "/").first.map(String.init) }
         return Array(Set(names)).sorted()
     }
+
+    public func move(_ source: String, to destination: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !files.keys.contains(where: { $0 == destination || $0.hasPrefix(destination + "/") }) else {
+            throw CocoaError(.fileWriteFileExists)
+        }
+        for (path, data) in files where path == source || path.hasPrefix(source + "/") {
+            files.removeValue(forKey: path)
+            files[destination + path.dropFirst(source.count)] = data
+        }
+    }
 }
 
 public struct LocalFileStore: FileStore {
@@ -47,6 +60,12 @@ public struct LocalFileStore: FileStore {
     public func list(_ directory: String) throws -> [String] {
         guard FileManager.default.fileExists(atPath: directory) else { return [] }
         return try FileManager.default.contentsOfDirectory(atPath: directory).sorted()
+    }
+
+    public func move(_ source: String, to destination: String) throws {
+        let parent = URL(fileURLWithPath: destination).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(atPath: source, toPath: destination)
     }
 }
 
@@ -102,6 +121,24 @@ public struct ProfileStore: Sendable {
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         try files.writeAtomically(try encoder.encode(approval), to: try path(profile.id, profile.revision, suffix: ".approval.json"))
         try files.writeAtomically(try ProfileCodec.encode(profile), to: try path(profile.id, profile.revision, suffix: ".json"))
+    }
+
+    /// Moves every revision of `id` to `<root>/deleted/<id>-<stamp>`, so the name is free again but the
+    /// approved history is kept.
+    public func archive(_ id: String, stamp: String) throws {
+        let existing = Set(try archivedProfiles())
+        var name = id + "-" + stamp
+        var counter = 1
+        while existing.contains(name) {
+            counter += 1
+            name = id + "-" + stamp + "-" + String(counter)
+        }
+        try files.move(try directory(id), to: root + "/deleted/" + name)
+    }
+
+    /// Names of archived profile directories, oldest first.
+    public func archivedProfiles() throws -> [String] {
+        try files.list(root + "/deleted")
     }
 
     private func directory(_ id: String) throws -> String {
