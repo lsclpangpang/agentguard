@@ -31,6 +31,8 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case pendingItems(profileID: String)
     case acknowledgeCollectorProblems
     case removeManagement(profileID: String, restoreOriginal: Bool, authorization: Data?)
+    /// 重启受管实例：改完规则后旧进程还按老沙箱在跑，必须重启才会装载新规则。
+    case restartManagedInstance(profileID: String)
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -110,6 +112,8 @@ public enum HelperResponse: Codable, Equatable, Sendable {
     /// The platform layer removes `label`; it restores the original item only when `restoreOriginalLabel` is set.
     case removal(label: String, restoreOriginalLabel: String?)
     case pendingItems([PendingItem])
+    /// 平台层先结束 `pids` 里的进程，再用 `plist` 重新注册 `label`。
+    case restartManaged(label: String, originalLabel: String?, plist: Data, pids: [Int32])
     case ok
     case failure(code: String)
 }
@@ -259,6 +263,9 @@ public final class HelperService {
             case let .removeManagement(profileID, restoreOriginal, authorization):
                 try require(role, in: [.app])
                 return try removeManagement(profileID, restoreOriginal: restoreOriginal, token: authorization)
+            case let .restartManagedInstance(profileID):
+                try require(role, in: [.app])
+                return try restartManaged(profileID)
             }
         } catch let failure as Failure {
             return .failure(code: failure.code)
@@ -344,6 +351,15 @@ public final class HelperService {
     private func installLaunchAgent(_ profileID: String) throws -> HelperResponse {
         let (definition, launch) = try launchDefinition(profileID)
         return .launchAgent(label: definition.label, originalLabel: launch.originalLabel, plist: try definition.xmlData())
+    }
+
+    private func restartManaged(_ profileID: String) throws -> HelperResponse {
+        let (definition, launch) = try launchDefinition(profileID)
+        let pids = tracker.instances(ofProfile: profileID)
+            .flatMap { $0.liveProcesses.map(\.pid) }
+            .sorted()
+        return .restartManaged(label: definition.label, originalLabel: launch.originalLabel,
+                               plist: try definition.xmlData(), pids: pids)
     }
 
     private func removeManagement(_ profileID: String, restoreOriginal: Bool, token: Data?) throws -> HelperResponse {

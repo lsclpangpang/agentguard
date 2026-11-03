@@ -364,6 +364,7 @@ private struct LaunchCard: View {
 
     @ViewBuilder private var actions: some View {
         Button("接管启动项") { model.installLaunchAgent(profile.id) }
+        Button("重启受管实例") { model.restartManaged(profile.id) }
             .buttonStyle(.borderedProminent)
         Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
         Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }

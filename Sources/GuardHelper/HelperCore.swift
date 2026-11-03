@@ -133,6 +133,20 @@ final class HelperCore {
             if !installLaunchAgent(label: label, originalLabel: originalLabel, plist: plist, config: config, owner: owner) {
                 return .failure(code: "launchctl_failed")
             }
+        case let .restartManaged(label, originalLabel, plist, pids):
+            guard case let .restartManagedInstance(profileID) = request else { return response }
+            // 沙箱规则是进程启动时装载的，旧进程不退，新修订就只是“存了但没生效”。
+            for pid in pids { kill(pid, SIGTERM) }
+            if !pids.isEmpty {
+                let deadline = Date().addingTimeInterval(3)
+                while Date() < deadline, pids.contains(where: { kill($0, 0) == 0 }) {
+                    usleep(100_000)
+                }
+                for pid in pids where kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+            }
+            if !installLaunchAgent(label: label, profileID: profileID, originalLabel: originalLabel, plist: plist, config: config, owner: owner) {
+                return .failure(code: "launchctl_failed")
+            }
         case let .removal(label, restoreOriginalLabel):
             removeLaunchAgent(label: label, restore: restoreOriginalLabel, config: config, owner: owner)
         default:
