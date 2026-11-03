@@ -130,7 +130,9 @@ public struct SuggestionEngine: Sendable {
         let groups = Dictionary(grouping: files.values) { entry in "/" + entry.path.components.dropLast().joined(separator: "/") }
         return groups.flatMap { parent, entries -> [PendingItem] in
             let paths = entries.map(\.path.value).sorted()
-            if entries.count >= aggregationThreshold {
+            // 临时目录里的文件名天然易变（xcrun_db-5AiXeqnE、claude-501/tmp-XXXX 之类），
+            // 逐条建议既没法批准、批准了也立刻过期，所以一律按目录聚合，不受阈值限制。
+            if entries.count >= aggregationThreshold || isUnderTemporaryRoot(parent) {
                 let access: Access = entries.contains(where: \.write) ? .readWrite : .readOnly
                 return [PendingItem(suggestion: .file(path: parent, kind: .directory, access: access), sensitive: sensitive.overlapsSensitive(parent),
                                     evidence: entries.reduce(0) { $0 + $1.count }, samples: Array(paths.prefix(3)))]
@@ -140,6 +142,13 @@ public struct SuggestionEngine: Sendable {
                             sensitive: sensitive.isSensitive(entry.path.value), evidence: entry.count, samples: [entry.path.value])
             }
         }
+    }
+
+    /// `/private/tmp`、`/tmp` 以及 `$TMPDIR`（`/private/var/folders/<x>/<y>/T`）。
+    private func isUnderTemporaryRoot(_ path: String) -> Bool {
+        for root in ["/private/tmp", "/tmp"] where path == root || path.hasPrefix(root + "/") { return true }
+        let parts = path.split(separator: "/")
+        return parts.count >= 6 && parts[0] == "private" && parts[1] == "var" && parts[2] == "folders" && parts[5] == "T"
     }
 
     private func grants(of template: Template) -> [PathGrant] {

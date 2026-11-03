@@ -205,8 +205,13 @@ public final class HelperService {
         tracker.instances(ofProfile: profileID)
     }
 
-    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool) {
-        tracker.register(instance: id, profileID: profileID, revision: revision, root: root, supervisedByLaunchd: supervisedByLaunchd, restored: true)
+    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey,
+                                supervisedByLaunchd: Bool, verified: Bool?) {
+        tracker.register(instance: id, profileID: profileID, revision: revision, root: root,
+                         supervisedByLaunchd: supervisedByLaunchd, restored: true)
+        // 验收结论也要一起恢复：否则 Helper 重启后状态会退回“等待验收”，
+        // 而实例并没有重启、也没有人再上报一次。
+        if let verified { self.verified[id] = verified }
     }
 
     public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {

@@ -32,7 +32,22 @@ import Testing
 
     @Test func pathsAreCanonicalized() throws {
         let result = try items([obs(.write("/tmp/claude-501/x"))])
-        #expect(result.map(\.suggestion) == [.file(path: "/private/tmp/claude-501/x", kind: .file, access: .readWrite)])
+        // 临时目录按目录聚合：文件名易变，逐条建议没法批准也维护不了。
+        #expect(result.map(\.suggestion) == [.file(path: "/private/tmp/claude-501", kind: .directory, access: .readWrite)])
+    }
+
+    @Test func volatileTempFilesCollapseIntoTheirDirectory() throws {
+        let tmp = "/private/var/folders/gp/gp44__855c98tghskbmxmsjr0000gn/T"
+        let observations: [Observation] = [
+            obs(.read(tmp + "/xcrun_db")),
+            obs(.write(tmp + "/xcrun_db-5AiXeqnE")),
+            obs(.write(tmp + "/xcrun_db-Cc7YNBGr")),
+            obs(.write(tmp + "/xcrun_db-EcYRW8he")),
+        ]
+        let result = try items(observations)
+        #expect(result.map(\.suggestion) == [Suggestion.file(path: tmp, kind: .directory, access: Access.readWrite)])
+        #expect(result.first?.evidence == 4)
+        #expect(result.first?.samples.count == 3)
     }
 
     @Test func manyFilesInOneDirectoryAggregate() throws {
