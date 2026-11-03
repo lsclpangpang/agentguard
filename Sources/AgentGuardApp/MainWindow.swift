@@ -9,6 +9,7 @@ struct MainWindow: View {
     @AppStorage(MainWindow.selectionKey) private var storedSelection = ""
     @State private var selection: String?
     @State private var creating = false
+    @AppStorage(MainWindowBehavior.pinnedKey) private var pinned = false
 
     var body: some View {
         NavigationSplitView {
@@ -20,10 +21,22 @@ struct MainWindow: View {
         .sheet(isPresented: $creating) {
             NewProfileSheet(isPresented: $creating).environmentObject(model)
         }
+        .background(WindowAccessor { MainWindowBehavior.apply(pinned: pinned, to: $0) })
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Toggle(isOn: $pinned) {
+                    Label(pinned ? "取消置顶" : "置顶窗口", systemImage: pinned ? "pin.fill" : "pin")
+                }
+                .toggleStyle(.button)
+                .help(pinned ? "取消置顶：窗口恢复普通层级" : "置顶：窗口始终显示在其他应用之上")
+            }
+        }
         .onAppear {
+            MainWindowBehavior.windowOpened()
             model.refresh()
             selection = storedSelection.isEmpty ? nil : storedSelection
         }
+        .onDisappear { MainWindowBehavior.windowClosed() }
         .onChange(of: selection) { _, value in storedSelection = value ?? "" }
         .onChange(of: model.report?.profiles.map(\.profileID) ?? []) { _, ids in
             if selection == nil || !(ids.contains(selection ?? "")) { selection = ids.first }
