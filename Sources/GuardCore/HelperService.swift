@@ -195,8 +195,8 @@ public final class HelperService {
         tracker.instances(ofProfile: profileID)
     }
 
-    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey) {
-        tracker.register(instance: id, profileID: profileID, revision: revision, root: root)
+    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool) {
+        tracker.register(instance: id, profileID: profileID, revision: revision, root: root, supervisedByLaunchd: supervisedByLaunchd)
     }
 
     public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {

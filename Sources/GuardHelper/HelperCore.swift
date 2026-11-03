@@ -145,6 +145,9 @@ final class HelperCore {
         var revision: Int
         var pid: Int32
         var startTime: UInt64
+        /// 由启动器注册的实例受 launchd 看护；恢复时要把这个事实一起带回来，
+        /// 否则重启 Helper 之后 detached 判定会静默消失。
+        var supervisedByLaunchd: Bool = false
     }
 
     private func instanceRecordPath(_ profileID: String) -> String? {
@@ -154,7 +157,9 @@ final class HelperCore {
     private func recordInstance(profileID: String, instance: Int, revision: Int, root: ProcessKey) {
         guard let path = instanceRecordPath(profileID),
               let startTime = ProcessFacts.startTime(pid: root.pid) else { return }
-        let record = InstanceRecord(instance: instance, revision: revision, pid: root.pid, startTime: startTime)
+        let snapshot = service?.instances(ofProfile: profileID).first { $0.id == instance }
+        let record = InstanceRecord(instance: instance, revision: revision, pid: root.pid, startTime: startTime,
+                                    supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false)
         try? JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
@@ -178,7 +183,8 @@ final class HelperCore {
             }
             if service.instances(ofProfile: profileID).contains(where: { $0.isRunning }) { continue }
             service.restoreInstance(id: record.instance, profileID: profileID, revision: record.revision,
-                                    root: ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime)))
+                                    root: ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime)),
+                                    supervisedByLaunchd: record.supervisedByLaunchd)
         }
     }
 
