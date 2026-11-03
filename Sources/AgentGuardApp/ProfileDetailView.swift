@@ -172,7 +172,9 @@ private struct FilesCard: View {
                 VStack(spacing: 0) {
                     ForEach(Array(profile.files.enumerated()), id: \.offset) { index, grant in
                         if index > 0 { Divider().padding(.leading, 46) }
-                        FileRow(grant: grant) { model.removeFile(grant, from: profile.id) }
+                        FileRow(grant: grant,
+                                remove: { model.removeFile(grant, from: profile.id) },
+                                setAccess: { model.setFileAccess(grant, to: $0, in: profile.id) })
                     }
                 }
             }
@@ -185,6 +187,7 @@ private struct FilesCard: View {
 private struct FileRow: View {
     let grant: FileGrant
     let remove: () -> Void
+    let setAccess: (Access) -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -196,7 +199,21 @@ private struct FileRow: View {
                 .layoutPriority(1)
             HStack(spacing: 6) {
                 if grant.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
-                Chip(text: grant.access == .readWrite ? "读写" : "只读", tint: grant.access == .readWrite ? .orange : .blue)
+                // 直接在这里切换读写级别：单独的授权项常常先按只读加进来，
+                // 用起来才发现要写，没必要删掉重加一遍。
+                Menu {
+                    Button("只读") { setAccess(.readOnly) }
+                        .disabled(grant.access == .readOnly)
+                    Button("读写") { setAccess(.readWrite) }
+                        .disabled(grant.access == .readWrite)
+                } label: {
+                    Chip(text: grant.access == .readWrite ? "读写" : "只读",
+                         tint: grant.access == .readWrite ? .orange : .blue)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("切换为只读或读写")
             }
             .fixedSize()
             Button(role: .destructive, action: remove) { Image(systemName: "trash") }
