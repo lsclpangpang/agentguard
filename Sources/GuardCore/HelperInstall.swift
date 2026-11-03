@@ -66,8 +66,9 @@ public enum HelperInstallRepair: Equatable, Sendable {
         }
     }
 
-    /// A refused registration that is already visible in Login Items needs the switch turned on.
-    public static let appReregistrationGuide = "请在“系统设置 > 通用 > 登录项 > 允许在后台”中打开 AgentGuard 的后台项目，然后回到本窗口刷新"
+    /// The daemon refuses a registration that the user has switched off, but a Helper that was
+    /// started before the app was re-signed looks identical from here: both end in no connection.
+    public static let appReregistrationGuide = "Helper 连不上：刚更新过 App 时它可能还停在旧签名上，重启一次 Helper 即可；否则请在“系统设置 > 通用 > 登录项 > 允许在后台”中打开 AgentGuard"
 }
 
 /// Delay before restarting a collector that exited without making progress, so a missing

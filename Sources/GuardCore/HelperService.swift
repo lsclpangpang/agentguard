@@ -121,7 +121,7 @@ public final class HelperService {
     private let compiler: PolicyCompiler
     private let renderer: SBPLRenderer
     private let catalog: TemplateCatalog
-    private let trust: CallerTrustPolicy
+    private var trust: CallerTrustPolicy
     private let verifier: any AuthorizationVerifier
     private let settings: HelperSettings
     private let clock: () -> Date
@@ -152,6 +152,12 @@ public final class HelperService {
     }
 
     /// Feeds process lifecycle events from the collector.
+    /// The bundled binaries are re-read from disk when they change, so a rebuilt — and therefore
+    /// re-signed — app keeps working without restarting this root daemon.
+    public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {
+        trust.identities = identities
+    }
+
     public func ingest(_ event: ProcessEvent) {
         tracker.handle(event)
     }

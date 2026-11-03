@@ -31,6 +31,9 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
         guard let token = CodeSigning.auditToken(of: connection),
               let identity = try? CodeSigning.identity(of: token, uid: Int(connection.effectiveUserIdentifier))
         else { return false }
+        // Re-read the bundle first: a rebuilt app has a new cdhash and must keep working without a
+        // daemon restart.
+        core.refreshIdentitiesIfChanged()
         if let requirement = core.codeSigningRequirement { connection.setCodeSigningRequirement(requirement) }
         connection.exportedInterface = NSXPCInterface(with: AgentGuardHelperXPC.self)
         connection.exportedObject = HelperSession(core: core, identity: identity, process: CodeSigning.processKey(token))

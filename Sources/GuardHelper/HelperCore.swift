@@ -8,7 +8,7 @@ import os
 /// Everything runs on `queue`.
 final class HelperCore {
     let queue = DispatchQueue(label: "com.lsclpangpang.agentguard.helper")
-    private let identities: [CallerRole: CodeIdentity]
+    private var identities: [CallerRole: CodeIdentity]
     private let paths = AgentGuardConfig(home: "/var/empty", uid: -1, homebrewPrefix: "/opt/homebrew")
     private var owner: OwnerRecord?
     private var config: AgentGuardConfig?
@@ -19,16 +19,33 @@ final class HelperCore {
 
     init(bundleMacOSDirectory: String) {
         self.bundleMacOSDirectory = bundleMacOSDirectory
+        self.identities = Self.readIdentities(bundleMacOSDirectory: bundleMacOSDirectory)
+        if let data = FileManager.default.contents(atPath: paths.ownerPath), let record = try? OwnerRecord.decode(data) {
+            adopt(record)
+        }
+    }
+
+    /// Reads the cdhash of every binary we are willing to trust. Called at startup and again
+    /// whenever the bundle changed on disk: an installed app gets re-signed on every rebuild, and
+    /// the running daemon must not need a restart to accept it.
+    static func readIdentities(bundleMacOSDirectory: String) -> [CallerRole: CodeIdentity] {
         var identities: [CallerRole: CodeIdentity] = [:]
         for (role, name) in [(CallerRole.app, "AgentGuard"), (.cli, "guard"), (.launcher, "agentguard-launcher")] {
             if let hash = try? CodeSigning.cdhash(atPath: bundleMacOSDirectory + "/" + name) {
                 identities[role] = CodeIdentity(signingIdentifier: AgentGuardConfig.signingIdentifier(role), teamIdentifier: nil, cdhashes: [hash])
             }
         }
-        self.identities = identities
-        if let data = FileManager.default.contents(atPath: paths.ownerPath), let record = try? OwnerRecord.decode(data) {
-            adopt(record)
-        }
+        return identities
+    }
+
+    /// Re-pins the bundled binaries when they were rebuilt. `true` means the trust set changed.
+    @discardableResult
+    func refreshIdentitiesIfChanged() -> Bool {
+        let fresh = Self.readIdentities(bundleMacOSDirectory: bundleMacOSDirectory)
+        guard fresh != identities else { return false }
+        identities = fresh
+        service?.updateIdentities(fresh)
+        return true
     }
 
     /// Only connections from our own bundle's binaries get past XPC.
