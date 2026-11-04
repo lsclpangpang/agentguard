@@ -61,8 +61,28 @@ import Testing
         }
     }
 
-    @Test func rejectsAnyGrantInsideProtectedPath() {
-        #expect(throws: CompileError.overlapsProtectedPath(grant: "/Library/Application Support/AgentGuard/state", protected: "/Library/Application Support/AgentGuard")) {
+    /// 生产环境里最容易踩的一脚：在“文件访问”里选 `~/Library`，整份配置档被拒，
+    /// 因为 `writeProtectedPaths` 里有 `~/Library/LaunchAgents` —— 一个能把 LaunchAgents
+    /// 一起放开的读写目录。只读同一目录是允许的，因为它写不进去。
+    @Test func rejectsWritableGrantContainingLaunchAgents() throws {
+        let environment = CompileEnvironment(
+            homeDirectory: "/Users/me",
+            protectedPaths: ["/Library/Application Support/AgentGuard"],
+            helperServiceName: "com.example.agentguard.helper",
+            resolver: AliasResolver.macOSDefault,
+            caseInsensitive: true,
+            allowsNestedReadOnly: false,
+            writeProtectedPaths: ["/Users/me/Library/LaunchAgents", "/Applications/AgentGuard.app"],
+            stateRoot: nil,
+            baseRules: []
+        )
+        #expect(throws: CompileError.overlapsProtectedPath(grant: "/Users/me/Library", protected: "/Users/me/Library/LaunchAgents")) {
+            try F.compile(F.profile(files: [F.rw("/Users/me/Library")]), environment: environment)
+        }
+        _ = try F.compile(F.profile(files: [F.ro("/Users/me/Library")]), environment: environment)
+    }
+
+    @Test func rejectsAnyGrantInsideProtectedPath() {        #expect(throws: CompileError.overlapsProtectedPath(grant: "/Library/Application Support/AgentGuard/state", protected: "/Library/Application Support/AgentGuard")) {
             try F.compile(F.profile(files: [F.ro("/Library/Application Support/AgentGuard/state")]))
         }
     }
@@ -126,6 +146,19 @@ import Testing
             try F.compile(F.profile(files: [F.rw("/Users/me/easyops")], exec: [ExecGrant(path: "/Users/me/easyops/tool")]))
         }
         _ = try F.compile(F.profile(files: [F.rw("/Users/me/easyops")], exec: [ExecGrant(path: "/Users/me/easyops/tool", sha256: String(repeating: "a", count: 64))]))
+    }
+
+    @Test func unrestrictedExecutionAllowsWritableDetectionTargets() throws {
+        var profile = F.profile(files: [F.rw("/Users/me/.knodo")], unrestrictedExec: true)
+        profile.programs = ["/Users/me/.knodo/agent/bin/knodo-agentd"]
+        let policy = try F.compile(profile)
+        #expect(policy.unrestrictedExec)
+        #expect(policy.exec == [EffectiveExecGrant(path: "/Users/me/.knodo/agent/bin/knodo-agentd", sha256: nil)])
+
+        profile.unrestrictedExec = false
+        #expect(throws: CompileError.mutableExecutableWithoutHash("/Users/me/.knodo/agent/bin/knodo-agentd")) {
+            try F.compile(profile)
+        }
     }
 
     @Test func rejectsMalformedHash() {

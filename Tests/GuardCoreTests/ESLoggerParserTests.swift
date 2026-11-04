@@ -35,6 +35,25 @@ import Testing
         #expect(parsed.processEvent == .exit(parent))
     }
 
+    @Test func birthsComeFromTheDescribedProcesses() throws {
+        let text = #"{"global_seq_num":1,"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":{"tv_sec":1700000000,"tv_usec":123456}},"event":{"fork":{"child":{"audit_token":{"pid":101,"pidversion":1},"start_time":{"tv_sec":1700000001,"tv_usec":234567}}}}}"#
+        let parsed = try ESLoggerParser.parse(text)
+        #expect(parsed.processStartTime == 1_700_000_000_123_456)
+        #expect(parsed.relatedProcessStartTime == 1_700_000_001_234_567)
+    }
+
+    @Test(arguments: ["2023-11-14T22:13:20.123456Z", "2023-11-15T06:13:20.123456+08:00"])
+    func exactRFC3339Birth(_ value: String) throws {
+        let text = #"{"global_seq_num":1,"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":"\#(value)"},"event":{"exit":{}}}"#
+        #expect(try ESLoggerParser.parse(text).processStartTime == 1_700_000_000_123_456)
+    }
+
+    @Test(arguments: ["2023-11-14T22:13:20.123Z", "garbage"])
+    func roundedOrUnknownBirthDoesNotEstablishIdentity(_ value: String) throws {
+        let text = #"{"global_seq_num":1,"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":"\#(value)"},"event":{"exit":{}}}"#
+        #expect(try ESLoggerParser.parse(text).processStartTime == nil)
+    }
+
     @Test func openWithWriteFlagIsWrite() throws {
         #expect(try ESLoggerParser.parse(line(1, #"{"open":{"fflag":3,"file":{"path":"/a"}}}"#)).observedAccess == .write("/a"))
         #expect(try ESLoggerParser.parse(line(1, #"{"open":{"fflag":1,"file":{"path":"/a"}}}"#)).observedAccess == .read("/a"))

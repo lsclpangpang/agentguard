@@ -47,7 +47,7 @@ import Testing
         var profile = F.profile(revision: 2)
         profile.launch = launch(label: "com.knodo.restricted-agent")
         let diff = PolicyDiff(from: try F.compile(F.profile()), to: try F.compile(profile))
-        #expect(diff.summaryLines.contains("~ 启动程序：/opt/knodo/knodo-agentd（替换原启动项 com.knodo.restricted-agent）"))
+        #expect(diff.summaryLines.contains("~ 启动程序：/opt/knodo/knodo-agentd（替换原启动项 com.knodo.restricted-agent）；登录时自动启动"))
     }
 
     // MARK: Unmanaged detection

@@ -126,7 +126,7 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .extraRuleRemoved(rule): return "rule-|\(rule)"
         case let .launchChanged(to):
             guard let to else { return "launch|-" }
-            return "launch|\(to.executable)|\(to.arguments.joined(separator: "\u{1f}"))|\(to.workingDirectory ?? "-")|\(to.originalLabel ?? "-")|\(to.restartOnCleanExit)"
+            return "launch|\(to.executable)|\(to.arguments.joined(separator: "\u{1f}"))|\(to.workingDirectory ?? "-")|\(to.originalLabel ?? "-")|\(to.restartOnCleanExit)|\(to.runAtLogin)|\(to.originalPath ?? "-")"
         case let .programAdded(path): return "program+|\(path)"
         case let .programRemoved(path): return "program-|\(path)"
         }
@@ -175,7 +175,10 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .extraRuleRemoved(rule): return "- 原样规则 \(rule)"
         case let .launchChanged(to):
             guard let to else { return "- 启动程序" }
-            return "~ 启动程序：" + ([to.executable] + to.arguments).joined(separator: " ") + (to.originalLabel.map { "（替换原启动项 \($0)）" } ?? "")
+            return "~ 启动程序：" + LaunchArguments.format([to.executable] + to.arguments)
+                + (to.originalLabel.map { "（替换原启动项 \($0)）" } ?? "")
+                + (to.workingDirectory.map { "；工作目录：\($0)" } ?? "")
+                + (to.runAtLogin ? "；登录时自动启动" : "；仅手动启动")
         case let .programAdded(path): return "+ 受管程序 \(path)"
         case let .programRemoved(path): return "- 受管程序 \(path)"
         }

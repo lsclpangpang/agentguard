@@ -180,6 +180,39 @@ import Testing
         #expect(s.handle(.deleteProfile(profileID: "nope", restoreOriginal: false, authorization: token), caller: F.appCaller, process: appProcess) == .failure(code: "unknown_profile"))
     }
 
+    @Test func startupCleanupFailureLeavesTheProfileAvailable() throws {
+        struct CleanupFailed: Error, CustomStringConvertible { var description: String { "cleanup_failed" } }
+        let store = ProfileStore(root: "/store", files: InMemoryFileStore())
+        let s = service(store)
+        create(s, F.profile())
+        var attempted = false
+        s.performProfileDeletion = { id, _, _ in
+            #expect(id == "knodo")
+            attempted = true
+            throw CleanupFailed()
+        }
+        #expect(s.handle(.deleteProfile(profileID: "knodo", restoreOriginal: false, authorization: token), caller: F.appCaller, process: appProcess) == .failure(code: "startup_error:cleanup_failed"))
+        #expect(attempted)
+        #expect(try store.latest("knodo") != nil)
+    }
+
+    @Test func startupCleanupRunsAfterAuthorizationAndWrapsArchival() throws {
+        let store = ProfileStore(root: "/store", files: InMemoryFileStore())
+        let s = service(store)
+        create(s, F.profile())
+        var called = false
+        s.performProfileDeletion = { _, _, archive in
+            called = true
+            #expect(try store.latest("knodo") != nil)
+            try archive()
+            #expect(try store.latest("knodo") == nil)
+        }
+        _ = s.handle(.deleteProfile(profileID: "knodo", restoreOriginal: false, authorization: nil), caller: F.appCaller, process: appProcess)
+        #expect(!called)
+        _ = s.handle(.deleteProfile(profileID: "knodo", restoreOriginal: false, authorization: token), caller: F.appCaller, process: appProcess)
+        #expect(called)
+    }
+
     @Test func scopeAndMessagesAreStable() {
         #expect(HelperService.authorizationScope(forDeletion: "knodo") == "delete.knodo")
         #expect(HelperFailure.message(for: "profile_running") != HelperFailure.message(for: "something_else"))

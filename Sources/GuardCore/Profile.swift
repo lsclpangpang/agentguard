@@ -128,13 +128,19 @@ public struct LaunchSettings: Codable, Hashable, Sendable {
     public var workingDirectory: String?
     public var originalLabel: String?
     public var restartOnCleanExit: Bool
+    public var runAtLogin: Bool
+    /// The selected item's actual filename need not match its Label.
+    public var originalPath: String?
 
-    public init(executable: String, arguments: [String], workingDirectory: String?, originalLabel: String?, restartOnCleanExit: Bool) {
+    public init(executable: String, arguments: [String], workingDirectory: String?, originalLabel: String?, restartOnCleanExit: Bool,
+                runAtLogin: Bool = true, originalPath: String? = nil) {
         self.executable = executable
         self.arguments = arguments
         self.workingDirectory = workingDirectory
         self.originalLabel = originalLabel
         self.restartOnCleanExit = restartOnCleanExit
+        self.runAtLogin = runAtLogin
+        self.originalPath = originalPath
     }
 
     enum CodingKeys: String, CodingKey {
@@ -142,6 +148,19 @@ public struct LaunchSettings: Codable, Hashable, Sendable {
         case workingDirectory = "working_directory"
         case originalLabel = "original_label"
         case restartOnCleanExit = "restart_on_clean_exit"
+        case runAtLogin = "run_at_login"
+        case originalPath = "original_path"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        executable = try c.decode(String.self, forKey: .executable)
+        arguments = try c.decode([String].self, forKey: .arguments)
+        workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory)
+        originalLabel = try c.decodeIfPresent(String.self, forKey: .originalLabel)
+        restartOnCleanExit = try c.decode(Bool.self, forKey: .restartOnCleanExit)
+        runAtLogin = try c.decodeIfPresent(Bool.self, forKey: .runAtLogin) ?? true
+        originalPath = try c.decodeIfPresent(String.self, forKey: .originalPath)
     }
 }
 

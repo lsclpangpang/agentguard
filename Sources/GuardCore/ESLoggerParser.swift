@@ -17,6 +17,9 @@ public struct ESLine: Equatable, Sendable {
     public var process: ProcessKey
     public var executablePath: String?
     public var kind: ESEventKind
+    /// Identity baselines from the event itself, never sampled later by a potentially reused PID.
+    public var processStartTime: UInt64? = nil
+    public var relatedProcessStartTime: UInt64? = nil
 
     public var processEvent: ProcessEvent? {
         switch kind {
@@ -63,7 +66,25 @@ public enum ESLoggerParser {
             throw ESParseError.missingField("event")
         }
         let body = event[name] as? [String: Any] ?? [:]
-        return ESLine(globalSequence: UInt64(sequence), process: key, executablePath: executablePath(process), kind: try kind(name, body))
+        let related = body[name == "fork" ? "child" : "target"] as? [String: Any]
+        return ESLine(globalSequence: UInt64(sequence), process: key, executablePath: executablePath(process), kind: try kind(name, body),
+                      processStartTime: startTime(process), relatedProcessStartTime: related.flatMap(startTime))
+    }
+
+    private static func startTime(_ process: [String: Any]) -> UInt64? {
+        if let time = process["start_time"] as? [String: Any], let seconds = integer(time["tv_sec"]), let micros = integer(time["tv_usec"]),
+           seconds > 0, micros >= 0, micros < 1_000_000 {
+            return UInt64(seconds) * 1_000_000 + UInt64(micros)
+        }
+        // Some eslogger versions render timeval as RFC3339. Only a complete microsecond value is
+        // usable for signaling; a rounded timestamp must not establish process identity.
+        guard let text = process["start_time"] as? String,
+              let range = text.range(of: #"\.\d{6}(?=Z|[+-]\d{2}:\d{2}$)"#, options: .regularExpression),
+              let micros = UInt64(text[range].dropFirst()) else { return nil }
+        let secondsText = String(text[..<range.lowerBound]) + String(text[range.upperBound...])
+        let formatter = ISO8601DateFormatter()
+        guard let date = formatter.date(from: secondsText), date.timeIntervalSince1970 > 0 else { return nil }
+        return UInt64(date.timeIntervalSince1970.rounded()) * 1_000_000 + micros
     }
 
     private static func kind(_ name: String, _ body: [String: Any]) throws -> ESEventKind {

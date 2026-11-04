@@ -36,4 +36,34 @@ import Testing
         #expect(Mode.restrictedLearning.displayName == "受限学习")
         #expect(Mode.unprotectedObserve.displayName == "无保护观察")
     }
+
+    /// The Helper answers every one of these with the single code `compile_error`. Nothing else in
+    /// the UI can say which path was refused, so each case has to carry its own instruction.
+    @Test func compileErrorsNameThePathThatWasRefused() {
+        #expect(CompileError.overlapsProtectedPath(grant: "/Users/me/Library", protected: "/Users/me/Library/LaunchAgents").message
+                == "/Users/me/Library 与受保护目录 /Users/me/Library/LaunchAgents 重叠，请选 /Users/me/Library/LaunchAgents 之外更具体的目录")
+        #expect(CompileError.forbiddenPath("/Users/me").message
+                    .hasPrefix("/Users/me 不能整体放行"))
+        #expect(CompileError.forbiddenPath("/").message.hasPrefix("/ 不能整体放行"))
+        #expect(CompileError.invalidPath("/x", .notAbsolute("x")).message == "/x 不是可用的路径：不是绝对路径（x）")
+        #expect(CompileError.nestedReadOnlyInsideReadWrite(inner: "/a", outer: "/").message
+                == "/a 是只读，但外层的 / 是读写，两条规则互相矛盾。要收回写权限，请先将外层目录改为只读或移除它的读写授权")
+        #expect(CompileError.mutableExecutableWithoutHash("/opt/bin").message
+                == "/opt/bin 落在可写目录里，必须限定哈希才能执行")
+    }
+
+    @Test func everyCompileErrorHasAMessage() {
+        let all: [CompileError] = [
+            .invalidProfileID("Bad"), .invalidRawRule("(deny)"), .invalidPath("/x", .empty),
+            .unknownTemplate("gone"), .templateVersionMismatch(id: "t", requested: 2, available: 1),
+            .forbiddenPath("/"), .overlapsProtectedPath(grant: "/a", protected: "/b"),
+            .nestedReadOnlyInsideReadWrite(inner: "/ba", outer: "/b"), .invalidPort(0),
+            .invalidHash("zz"), .conflictingHashes("/e"), .mutableExecutableWithoutHash("/e"),
+            .invalidLaunchLabel("bad label"),
+        ]
+        for error in all {
+            #expect(!error.message.isEmpty)
+            #expect(!error.message.contains("Optional("))
+        }
+    }
 }

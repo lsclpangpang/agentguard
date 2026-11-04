@@ -114,6 +114,8 @@ public struct PolicyCompiler: Sendable {
         var launch = profile.launch
         if let settings = launch {
             launch?.executable = try canonical(settings.executable).value
+            if let directory = settings.workingDirectory { launch?.workingDirectory = try canonical(directory).value }
+            if let path = settings.originalPath { launch?.originalPath = try canonical(path).value }
             if let label = settings.originalLabel, !Self.isSafeLaunchLabel(label) { throw CompileError.invalidLaunchLabel(label) }
         }
         let programs = Array(Set(try profile.programs.map { try canonical($0).value })).sorted()
@@ -129,7 +131,8 @@ public struct PolicyCompiler: Sendable {
             }
         }
         let targetExec = targets.map { ExecGrant(path: $0) }
-        let exec = try compileExec(profile.exec + templates.flatMap(\.exec) + targetExec, files: files)
+        let exec = try compileExec(profile.exec + templates.flatMap(\.exec) + targetExec, files: files,
+                                   unrestrictedExec: profile.unrestrictedExec)
         var network = profile.network
         network.loopbackTCPConnect = try compilePorts(profile.network.loopbackTCPConnect + templates.flatMap(\.loopbackPorts))
         return EffectivePolicy(
@@ -267,7 +270,8 @@ public struct PolicyCompiler: Sendable {
         }
     }
 
-    private func compileExec(_ grants: [ExecGrant], files: [CanonicalFileGrant]) throws -> [EffectiveExecGrant] {
+    private func compileExec(_ grants: [ExecGrant], files: [CanonicalFileGrant],
+                             unrestrictedExec: Bool) throws -> [EffectiveExecGrant] {
         var merged: [String: (path: CanonicalPath, sha256: String?, unrestricted: Bool)] = [:]
         for grant in grants {
             let path = try canonical(grant.path)
@@ -285,7 +289,9 @@ public struct PolicyCompiler: Sendable {
         }
         let writable = files.filter { $0.access == .readWrite }
         let result = merged.values.sorted { $0.path.value < $1.path.value }
-        for entry in result where entry.sha256 == nil {
+        // An unrestricted execution policy already permits every binary, including mutable ones.
+        // Detection targets must not accidentally reintroduce a hash restriction in that mode.
+        for entry in result where entry.sha256 == nil && !unrestrictedExec {
             let mutable = writable.contains { grant in
                 grant.kind == .directory
                     ? grant.path.contains(entry.path, caseInsensitive: caseInsensitive)

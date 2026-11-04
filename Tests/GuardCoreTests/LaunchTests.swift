@@ -23,7 +23,7 @@ import Testing
         #expect(diff.summaryLines == [
             "- 只读文件 /Library/Application Support/AgentGuard Releases/knodo/knodo-agentd",
             "+ 只读文件 /Users/me/evil",
-            "~ 启动程序：/Users/me/evil run（替换原启动项 com.knodo.local-agent）",
+            "~ 启动程序：/Users/me/evil run（替换原启动项 com.knodo.local-agent）；登录时自动启动",
             "- 可执行 /Library/Application Support/AgentGuard Releases/knodo/knodo-agentd",
             "+ 可执行 /Users/me/evil",
         ])
@@ -33,6 +33,41 @@ import Testing
         var p = agentProfile()
         p.launch?.executable = "/Users/me/easyops/agent"
         #expect(throws: CompileError.mutableExecutableWithoutHash("/Users/me/easyops/agent")) { try F.compile(p) }
+    }
+
+    @Test func oldStartupSettingsRetainLoginBehavior() throws {
+        let data = Data(#"{"executable":"/bin/sleep","arguments":["60"],"restart_on_clean_exit":false}"#.utf8)
+        let launch = try JSONDecoder().decode(LaunchSettings.self, from: data)
+        #expect(launch.runAtLogin)
+        #expect(launch.originalPath == nil)
+        var changed = launch
+        changed.runAtLogin = false
+        changed.originalPath = "/Library/LaunchAgents/unrelated-filename.plist"
+        #expect(try JSONDecoder().decode(LaunchSettings.self, from: JSONEncoder().encode(changed)) == changed)
+    }
+
+    @Test func loginChoiceAndOriginalLocationAreBoundToApproval() throws {
+        let base = try F.compile(agentProfile())
+        var manual = agentProfile()
+        manual.launch?.runAtLogin = false
+        let manualDiff = PolicyDiff(from: base, to: try F.compile(manual))
+        #expect(manualDiff.requiresAuthorization)
+        #expect(manualDiff.summaryLines.last?.hasSuffix("仅手动启动") == true)
+        var differentSource = manual
+        differentSource.launch?.originalPath = "/Library/LaunchAgents/different-name.plist"
+        #expect(PolicyDiff(from: base, to: try F.compile(differentSource)).digest != manualDiff.digest)
+        #expect(PolicyDiff(from: base, to: base).digest != manualDiff.digest)
+    }
+
+    @Test(arguments: [[], [""], ["a", "b c", "", "a\\b", "a\"b", "it's", "$HOME", "$(touch /tmp/never-execute)", "中文 路径", "a\nb"]])
+    func argumentsRoundTrip(_ args: [String]) throws {
+        #expect(try LaunchArguments.parse(LaunchArguments.format(args)) == args)
+    }
+
+    @Test func argumentQuotesAreValidatedWithoutExecutingAnything() throws {
+        #expect(try LaunchArguments.parse(#"'one two' a\ b """#) == ["one two", "a b", ""])
+        #expect(throws: LaunchArguments.ParseError.unfinishedQuote) { try LaunchArguments.parse("'unfinished") }
+        #expect(throws: LaunchArguments.ParseError.unfinishedEscape) { try LaunchArguments.parse("abc\\") }
     }
 
     @Test func agentPlanUsesStateDirectoryAndNullStdin() throws {

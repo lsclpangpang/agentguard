@@ -193,6 +193,8 @@ struct FakeVerifier: AuthorizationVerifier {
         }
         let response = HelperResponse.registered(instance: 4, sbpl: "(version 1)\n")
         #expect(try HelperWire.decodeResponse(HelperWire.encode(response)) == response)
+        let warning = HelperResponse.completed(warnings: ["部分旧进程未终止", "启动文件已保留"])
+        #expect(try HelperWire.decodeResponse(HelperWire.encode(warning)) == warning)
     }
 
     func agentProfile(revision: Int) -> Profile {
@@ -277,7 +279,7 @@ struct FakeVerifier: AuthorizationVerifier {
         guard case let .status(report) = s.handle(.status, caller: F.appCaller, process: appProcess) else {
             Issue.record("expected status"); return
         }
-        #expect(report.collectorProblems == ["丢失 3 个事件", "未授权（需要完全磁盘访问）"])
+        #expect(report.collectorProblems == ["累计遗漏 3 条系统活动记录", "未授权（需要完全磁盘访问）"])
     }
 
     @Test func pendingItemsRequireTheApp() {

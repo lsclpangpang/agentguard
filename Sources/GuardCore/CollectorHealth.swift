@@ -24,7 +24,7 @@ extension CollectorProblem: CustomStringConvertible {
     public var description: String {
         switch self {
         case .notStarted: return "采集器未启动"
-        case let .droppedEvents(count): return "丢失 \(count) 个事件"
+        case let .droppedEvents(count): return "累计遗漏 \(count) 条系统活动记录"
         case .interrupted: return "采集中断"
         case .restartedAfterInterruption: return "采集曾中断，已重启"
         case .unauthorized: return "未授权（需要完全磁盘访问）"
