@@ -12,7 +12,8 @@ struct MenuBarView: View {
         let overall = model.overall
         VStack(spacing: 0) {
             header(overall)
-            if !overall.reasons.isEmpty {
+            // Helper 断开时下面的占位已经说明了，别再重复一遍。
+            if model.helperReachable, !overall.reasons.isEmpty {
                 reasons(overall)
             }
             content
@@ -105,7 +106,7 @@ struct MenuBarView: View {
                     .padding(.horizontal, 6)
                 }
                 // 配置档多了也别把面板撑出屏幕。
-                .frame(maxHeight: min(CGFloat(profiles.count) * 46, 46 * 6))
+                .frame(height: min(CGFloat(profiles.count) * 46 - 2, 46 * 6 - 2))
             }
             .padding(.top, 4)
             .padding(.bottom, 8)

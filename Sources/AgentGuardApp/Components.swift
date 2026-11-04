@@ -154,7 +154,7 @@ struct ConfirmationSheet: View {
     let pending: PendingConfirmation
     let answer: (Bool) -> Void
 
-    private var needsScroll: Bool { pending.lines.count > 8 }
+    private var needsScroll: Bool { pending.lines.count > 8 || pending.lines.reduce(0) { $0 + $1.count } > 480 }
 
     /// 差异摘要以 “+ / - / ~ ” 开头；按这个前缀上色，一眼分出新增、收回和修改。
     private var isDiff: Bool { pending.lines.contains { DiffLine.marker(of: $0) != nil } }
@@ -213,7 +213,8 @@ private struct DiffLine: View {
     static func marker(of line: String) -> (symbol: String, tint: Color)? {
         if line.hasPrefix("+ ") { return ("plus.circle.fill", .orange) }
         if line.hasPrefix("- ") { return ("minus.circle.fill", .green) }
-        if line.hasPrefix("~ ") { return ("arrow.left.arrow.right.circle.fill", .blue) }
+        // 改成读写、改成允许也是放宽，和授权提示保持一致用橙色。
+        if line.hasPrefix("~ ") { return ("arrow.left.arrow.right.circle.fill", line.hasSuffix("读写") || line.hasSuffix("允许") ? .orange : .blue) }
         return nil
     }
 
