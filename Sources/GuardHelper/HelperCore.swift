@@ -5,7 +5,7 @@ import GuardPlatform
 import os
 
 /// Owns the HelperService and performs the privileged side effects its decisions call for.
-/// Everything runs on `queue`.
+/// Mutable service state runs on `queue`; slow startup-state inspection has its own worker.
 final class HelperCore {
     let queue = DispatchQueue(label: "com.lsclpangpang.agentguard.helper")
     private var identities: [CallerRole: CodeIdentity]
@@ -16,6 +16,9 @@ final class HelperCore {
     private let collector = Collector()
     private let bundleMacOSDirectory: String
     private var started = false
+    private var processBirths: [ProcessKey: UInt64] = [:]
+    private var launchStatusMonitor: LaunchStatusMonitor?
+    private var operationWarnings: [String] = []
 
     init(bundleMacOSDirectory: String) {
         self.bundleMacOSDirectory = bundleMacOSDirectory
@@ -67,7 +70,23 @@ final class HelperCore {
         if case let .failed(reason) = CollectorInstaller.ensureInstalled(bundleMacOSDirectory: bundleMacOSDirectory) {
             FileHandle.standardError.write(Data("采集器安装失败：\(reason)\n".utf8))
         }
-        collector.onLine = { [weak self] line in self?.queue.async { self?.service?.observe(line: line) } }
+        collector.onLine = { [weak self] line in self?.queue.async {
+            guard let self else { return }
+            if self.service?.managedInstance(of: line.process) != nil {
+                var births: [(ProcessKey, UInt64?)] = [(line.process, line.processStartTime)]
+                if case let .fork(child) = line.kind { births.append((child, line.relatedProcessStartTime)) }
+                if case let .exec(target, _) = line.kind {
+                    // Exec changes the audit-token image version but preserves process birth.
+                    let inherited = target.pid == line.process.pid ? self.processBirths[line.process] : nil
+                    births.append((target, line.relatedProcessStartTime ?? inherited))
+                }
+                for (key, birth) in births where self.processBirths[key] == nil {
+                    if let birth { self.processBirths[key] = birth }
+                }
+            }
+            self.service?.observe(line: line)
+            if case .exit = line.kind { self.processBirths.removeValue(forKey: line.process) }
+        } }
         collector.onDenial = { [weak self] denial in self?.queue.async { self?.service?.observe(denial: denial) } }
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -78,6 +97,9 @@ final class HelperCore {
                 self.reconcileInstances()
             }
         }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.queue.async { self?.refreshLaunchStatus() }
+        }
         refreshCollector()
     }
 
@@ -85,6 +107,14 @@ final class HelperCore {
         let response: HelperResponse
         if let request = try? HelperWire.decodeRequest(data) {
             claimOwnershipIfNeeded(identity)
+            operationWarnings = []
+            defer {
+                switch request {
+                case .approveChange, .applyTightening, .installLaunchAgent, .restartManagedInstance, .removeManagement, .deleteProfile:
+                    refreshLaunchStatus(invalidate: true)
+                default: break
+                }
+            }
             if let service {
                 response = apply(service.handle(request, caller: identity, process: process), for: request)
                 if case let .registerInstance(profileID, revision) = request,
@@ -127,6 +157,10 @@ final class HelperCore {
             try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
         }
         self.config = config
+        let files = launchFiles(config: config, owner: record), domain = "gui/\(record.uid)"
+        launchStatusMonitor = LaunchStatusMonitor { requests in
+            LaunchItemController(files: files, domain: domain, fileOwner: 0).statuses(requests)
+        }
         service = HelperService(
             store: config.store, environment: config.environment, catalog: TemplateCatalog(config.templates),
             trust: CallerTrustPolicy(allowedUID: record.uid, identities: identities),
@@ -140,8 +174,18 @@ final class HelperCore {
             self.collector.acknowledge()
             self.service?.updateCollectorHealth(self.collector.health())
         }
+        service?.performProfileDeletion = { [weak self] id, originalLabel, archive in
+            guard let self else { throw LaunchItemError.operationFailed }
+            let plan = self.validatedTargets(id)
+            let hasLaunch = (try config.store.latest(id))?.launch != nil
+            let warnings = try self.launchController(config: config, owner: record).remove(profileID: id, restoreOriginal: originalLabel,
+                                                                                          hasLaunchSettings: hasLaunch, deleting: true,
+                                                                                          stop: { self.stopTargets(plan.targets) }, commit: archive)
+            self.operationWarnings += plan.warnings + warnings
+        }
         if started { refreshCollector() }
         reconcileInstances()
+        refreshLaunchStatus(invalidate: true)
     }
 
     /// 实例追踪表在内存里，Helper 一重启就空了，界面会把正在跑的受管对象误报成“已停止”。
@@ -188,6 +232,7 @@ final class HelperCore {
         let snapshot = service?.instances(ofProfile: profileID).first { $0.id == instance }
         let record = InstanceRecord(instance: instance, revision: revision, pid: root.pid, startTime: startTime,
                                     supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false, verified: nil)
+        processBirths[root] = startTime
         try? JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
@@ -226,6 +271,7 @@ final class HelperCore {
             service.restoreInstance(id: record.instance, profileID: profileID, revision: record.revision,
                                     root: ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime)),
                                     supervisedByLaunchd: record.supervisedByLaunchd, verified: record.verified)
+            processBirths[ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime))] = record.startTime
         }
     }
 
@@ -234,34 +280,28 @@ final class HelperCore {
     private func apply(_ response: HelperResponse, for request: HelperRequest) -> HelperResponse {
         guard let config, let owner else { return response }
         switch response {
+        case var .status(report):
+            for index in report.profiles.indices {
+                let id = report.profiles[index].profileID
+                report.profiles[index].launchAgent = launchStatusMonitor?.status(for: id)
+            }
+            return .status(report)
         case .registered:
             if case let .registerInstance(profileID, _) = request { prepareStateDirectory(profileID, config: config, owner: owner) }
         case .applied:
             refreshCollector()
         case let .launchAgent(label, originalLabel, plist):
             guard case let .installLaunchAgent(profileID) = request else { return response }
-            if !installLaunchAgent(label: label, profileID: profileID, originalLabel: originalLabel, plist: plist, config: config, owner: owner) {
-                return .failure(code: "launchctl_failed")
-            }
+            do { try installLaunchAgent(label: label, profileID: profileID, originalLabel: originalLabel, plist: plist, config: config, owner: owner) }
+            catch { return .failure(code: "startup_error:" + String(describing: error)) }
         case let .restartManaged(label, originalLabel, plist, pids):
             guard case let .restartManagedInstance(profileID) = request else { return response }
-            // 沙箱规则是进程启动时装载的，旧进程不退，新修订就只是“存了但没生效”。
-            for pid in pids { kill(pid, SIGTERM) }
-            if !pids.isEmpty {
-                let deadline = Date().addingTimeInterval(3)
-                while Date() < deadline, pids.contains(where: { kill($0, 0) == 0 }) {
-                    usleep(100_000)
-                }
-                for pid in pids where kill(pid, 0) == 0 { kill(pid, SIGKILL) }
-            }
-            if !installLaunchAgent(label: label, profileID: profileID, originalLabel: originalLabel, plist: plist, config: config, owner: owner) {
-                return .failure(code: "launchctl_failed")
-            }
-        case let .deleted(profileID, restoreOriginalLabel):
-            // The profile is gone, so any of its managed LaunchAgents would only fail to start.
-            let domain = "gui/\(owner.uid)"
-            removeStaleLaunchAgents(except: "", profileID: profileID, domain: domain)
-            if let restoreOriginalLabel { restoreOriginalLaunchAgent(restoreOriginalLabel, config: config, domain: domain) }
+            _ = pids // Identity-checked targets are obtained before unloading the jobs below.
+            do { try installLaunchAgent(label: label, profileID: profileID, originalLabel: originalLabel, plist: plist, config: config, owner: owner, restart: true) }
+            catch { return .failure(code: "startup_error:" + String(describing: error)) }
+        case let .deleted(profileID, _):
+            // Known startup-file changes completed transactionally before archiving. Any skipped
+            // cleanup is reported in operationWarnings rather than blocking unrelated deletion.
             // Archived, not removed: it may hold the agent's working files. A recreated profile with
             // the same name must not see the old contents (or the old instance record).
             let state = config.stateRoot + "/" + profileID
@@ -274,11 +314,15 @@ final class HelperCore {
             refreshCollector()
         case let .removal(label, restoreOriginalLabel):
             guard case let .removeManagement(profileID, _, _) = request else { return response }
-            removeLaunchAgent(label: label, profileID: profileID, restore: restoreOriginalLabel, config: config, owner: owner)
+            do {
+                try removeLaunchAgent(label: label, profileID: profileID, restore: restoreOriginalLabel, config: config, owner: owner)
+            } catch {
+                return .failure(code: "startup_error:" + String(describing: error))
+            }
         default:
             break
         }
-        return response
+        return operationWarnings.isEmpty ? response : .completed(warnings: operationWarnings)
     }
 
     private func prepareStateDirectory(_ profileID: String, config: AgentGuardConfig, owner: OwnerRecord) {
@@ -289,57 +333,53 @@ final class HelperCore {
         }
     }
 
-    private func installLaunchAgent(label: String, profileID: String, originalLabel: String?, plist: Data, config: AgentGuardConfig, owner: OwnerRecord) -> Bool {
-        let path = "/Library/LaunchAgents/\(label).plist"
-        do {
-            try plist.write(to: URL(fileURLWithPath: path), options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o644, .ownerAccountID: 0, .groupOwnerAccountID: 0], ofItemAtPath: path)
-        } catch {
-            return false
-        }
-        let domain = "gui/\(owner.uid)"
-        if let originalLabel {
-            _ = Launchctl.run(["bootout", "\(domain)/\(originalLabel)"])
-            for location in [owner.home + "/Library/LaunchAgents/\(originalLabel).plist", "/Library/LaunchAgents/\(originalLabel).plist"]
-            where FileManager.default.fileExists(atPath: location) {
-                let backup = config.configRoot + "/backups/\(originalLabel).plist"
-                try? FileManager.default.removeItem(atPath: backup)
-                try? FileManager.default.moveItem(atPath: location, toPath: backup)
-                try? location.write(toFile: backup + ".location", atomically: true, encoding: .utf8)
-            }
-        }
-        _ = Launchctl.run(["bootout", "\(domain)/\(label)"])
-        // 换过 label（启动器重编 → 指纹变）之后，旧 plist 还留在 /Library/LaunchAgents 里，
-        // 留着就是重复实例或永久失效的 EX_CONFIG 任务，这里顺手清干净。
-        removeStaleLaunchAgents(except: label, profileID: profileID, domain: domain)
-        return Launchctl.run(["bootstrap", domain, path]) == 0
+    private func launchFiles(config: AgentGuardConfig, owner: OwnerRecord) -> LaunchItemFiles {
+        LaunchItemFiles(home: owner.home, configRoot: config.configRoot, launcherPath: config.launcherPath,
+                        labelPrefix: AgentGuardConfig.labelPrefix)
     }
 
-    private func removeStaleLaunchAgents(except keep: String, profileID: String, domain: String) {
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/Library/LaunchAgents") else { return }
-        for entry in entries where entry.hasSuffix(".plist") {
-            let label = String(entry.dropLast(6))
-            guard LaunchAgentDefinition.isManagedLabel(label, profileID: profileID, labelPrefix: AgentGuardConfig.labelPrefix), label != keep else { continue }
-            _ = Launchctl.run(["bootout", "\(domain)/\(label)"])
-            try? FileManager.default.removeItem(atPath: "/Library/LaunchAgents/\(entry)")
+    private func launchController(config: AgentGuardConfig, owner: OwnerRecord) -> LaunchItemController {
+        LaunchItemController(files: launchFiles(config: config, owner: owner), domain: "gui/\(owner.uid)", fileOwner: 0)
+    }
+
+    private func refreshLaunchStatus(invalidate: Bool = false) {
+        guard let config, let monitor = launchStatusMonitor else { return }
+        let requests = ((try? config.store.profileIDs()) ?? []).compactMap { id -> LaunchStatusRequest? in
+            guard let profile = try? config.store.latest(id) else { return nil }
+            return LaunchStatusRequest(id: id, launch: profile.launch)
         }
+        monitor.refresh(requests, invalidate: invalidate)
     }
 
-    private func removeLaunchAgent(label: String, profileID: String, restore originalLabel: String?, config: AgentGuardConfig, owner: OwnerRecord) {
-        let domain = "gui/\(owner.uid)"
-        _ = Launchctl.run(["bootout", "\(domain)/\(label)"])
-        try? FileManager.default.removeItem(atPath: "/Library/LaunchAgents/\(label).plist")
-        removeStaleLaunchAgents(except: "", profileID: profileID, domain: domain)
-        guard let originalLabel else { return }
-        restoreOriginalLaunchAgent(originalLabel, config: config, domain: domain)
+    private func stopTargets(_ targets: [Int32: UInt64]) {
+        func stillSame(_ pid: Int32) -> Bool { ProcessFacts.startTime(pid: pid) == targets[pid] }
+        for pid in targets.keys where stillSame(pid) { kill(pid, SIGTERM) }
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, targets.keys.contains(where: stillSame) { usleep(100_000) }
+        for pid in targets.keys where stillSame(pid) { kill(pid, SIGKILL) }
     }
 
-    private func restoreOriginalLaunchAgent(_ originalLabel: String, config: AgentGuardConfig, domain: String) {
-        let backup = config.configRoot + "/backups/\(originalLabel).plist"
-        guard let location = try? String(contentsOfFile: backup + ".location", encoding: .utf8), FileManager.default.fileExists(atPath: backup) else { return }
-        try? FileManager.default.moveItem(atPath: backup, toPath: location)
-        try? FileManager.default.removeItem(atPath: backup + ".location")
-        _ = Launchctl.run(["bootstrap", domain, location])
+    private func validatedTargets(_ id: String) -> ProcessStopPlan {
+        ProcessStopPlan(processes: service?.instances(ofProfile: id).flatMap({ $0.liveProcesses }) ?? [],
+                        births: processBirths, currentBirth: ProcessFacts.startTime)
+    }
+
+    private func installLaunchAgent(label: String, profileID: String, originalLabel: String?, plist: Data,
+                                    config: AgentGuardConfig, owner: OwnerRecord, restart: Bool = false) throws {
+        guard let launch = try config.store.latest(profileID)?.launch else { throw LaunchItemError.operationFailed }
+        let plan = validatedTargets(profileID)
+        let warnings = try launchController(config: config, owner: owner).install(profileID: profileID, launch: launch, label: label, plist: plist, restart: restart) {
+            self.stopTargets(plan.targets)
+        }
+        operationWarnings += plan.warnings + warnings
+    }
+
+    private func removeLaunchAgent(label: String, profileID: String, restore originalLabel: String?, config: AgentGuardConfig, owner: OwnerRecord) throws {
+        let plan = validatedTargets(profileID)
+        let warnings = try launchController(config: config, owner: owner).remove(profileID: profileID, restoreOriginal: originalLabel, stop: {
+            self.stopTargets(plan.targets)
+        })
+        operationWarnings += plan.warnings + warnings
     }
 
     /// File events are only collected while some profile is learning; lifecycle events always.

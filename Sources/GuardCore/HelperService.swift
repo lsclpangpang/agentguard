@@ -69,9 +69,11 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var detachedInstances: [Int]
     /// PIDs running one of the profile's programs outside any managed instance, as of the last process scan.
     public var unmanagedProcesses: [Int32]
+    /// Nil means an older Helper has not reported the actual launch registration.
+    public var launchAgent: LaunchAgentStatus?
 
     public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int,
-                detachedInstances: [Int] = [], unmanagedProcesses: [Int32] = []) {
+                detachedInstances: [Int] = [], unmanagedProcesses: [Int32] = [], launchAgent: LaunchAgentStatus? = nil) {
         self.profileID = profileID
         self.savedRevision = savedRevision
         self.mode = mode
@@ -80,10 +82,11 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         self.pendingCount = pendingCount
         self.detachedInstances = detachedInstances
         self.unmanagedProcesses = unmanagedProcesses
+        self.launchAgent = launchAgent
     }
 
     enum CodingKeys: String, CodingKey {
-        case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances, unmanagedProcesses
+        case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances, unmanagedProcesses, launchAgent
     }
 
     /// The app and the helper are updated separately; a report from an older helper has no `detachedInstances`.
@@ -97,6 +100,7 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         pendingCount = try c.decode(Int.self, forKey: .pendingCount)
         detachedInstances = try c.decodeIfPresent([Int].self, forKey: .detachedInstances) ?? []
         unmanagedProcesses = try c.decodeIfPresent([Int32].self, forKey: .unmanagedProcesses) ?? []
+        launchAgent = try c.decodeIfPresent(LaunchAgentStatus.self, forKey: .launchAgent)
     }
 }
 
@@ -127,6 +131,8 @@ public enum HelperResponse: Codable, Equatable, Sendable {
     /// directory and, when `restoreOriginalLabel` is set, restores that original launch item.
     case deleted(profileID: String, restoreOriginalLabel: String?)
     case ok
+    /// The action completed; some optional cleanup or direct process termination was skipped.
+    case completed(warnings: [String])
     case failure(code: String)
 }
 
@@ -182,6 +188,8 @@ public final class HelperService {
     private static let observationLimit = 5000
     /// Set by the platform layer, which owns the collector's health monitor.
     public var onAcknowledgeCollectorProblems: (() -> Void)?
+    /// The platform wraps archival in startup cleanup/rollback, after trust and authorization.
+    public var performProfileDeletion: ((_ id: String, _ restoreOriginalLabel: String?, _ archive: () throws -> Void) throws -> Void)?
 
     public init(store: ProfileStore, environment: CompileEnvironment, catalog: TemplateCatalog, trust: CallerTrustPolicy,
                 verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String,
@@ -420,7 +428,11 @@ public final class HelperService {
         guard verifier.verify(token: token, scope: Self.authorizationScope(forDeletion: profileID, restoreOriginal: restoreLabel != nil), summary: summary) else {
             throw ApprovalError.authorizationMissing
         }
-        try store.archive(profileID, stamp: String(Int(clock().timeIntervalSince1970)))
+        let archive = { try self.store.archive(profileID, stamp: String(Int(self.clock().timeIntervalSince1970))) }
+        if let performProfileDeletion {
+            do { try performProfileDeletion(profileID, restoreLabel, archive) }
+            catch { throw Failure(code: "startup_error:" + String(describing: error)) }
+        } else { try archive() }
         // A recreated profile with the same name must start clean, not inherit old instances or findings.
         for instance in tracker.removeInstances(ofProfile: profileID) { verified.removeValue(forKey: instance) }
         observations.removeValue(forKey: profileID)

@@ -9,26 +9,58 @@ struct MainWindow: View {
     @AppStorage(MainWindow.selectionKey) private var storedSelection = ""
     @State private var selection: String?
     @State private var creating = false
+    @State private var sidebarVisible = true
     @AppStorage(MainWindowBehavior.pinnedKey) private var pinned = false
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
-        } detail: {
-            detail
+        // NavigationSplitView's titlebar safe area shifts both columns when a notice is inserted
+        // after an open panel closes. A native split view keeps the columns inside this viewport.
+        GeometryReader { viewport in
+            HSplitView {
+                if sidebarVisible {
+                    sidebar
+                        .frame(width: 220)
+                        .frame(maxHeight: .infinity)
+                }
+                detail
+            }
+            .frame(width: viewport.size.width, height: viewport.size.height)
         }
-        .navigationSplitViewStyle(.balanced)
+        .navigationTitle(selection ?? "AgentGuard")
         .sheet(isPresented: $creating) {
             NewProfileSheet(isPresented: $creating).environmentObject(model)
         }
-        // When a sheet closes AppKit hands focus to the window's first text field, the port field near
-        // the bottom, and scrolls the detail view down to it.
         .sheet(item: $model.confirmation, onDismiss: { NSApp.keyWindow?.makeFirstResponder(nil) }) { pending in
             ConfirmationSheet(pending: pending) { model.answerConfirmation($0) }
         }
         .background(WindowAccessor { MainWindowBehavior.apply(pinned: pinned, to: $0) })
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button { sidebarVisible.toggle() } label: {
+                    Label(sidebarVisible ? "隐藏侧栏" : "显示侧栏", systemImage: "sidebar.left")
+                }
+                .help(sidebarVisible ? "隐藏侧栏" : "显示侧栏")
+            }
+            ToolbarItem(placement: .navigation) {
+                Menu {
+                    Button("新建配置档…") { creating = true }
+                    Divider()
+                    Button("导入现有 Knodo 沙箱") { model.importKnodo() }
+                } label: {
+                    Label("添加", systemImage: "plus")
+                } primaryAction: {
+                    creating = true
+                }
+                .disabled(!model.helperReachable)
+                .help("新建配置档")
+            }
+            ToolbarItem(placement: .automatic) {
+                CollectorTipsButton(
+                    problems: model.helperProblems,
+                    reachable: model.helperReachable,
+                    acknowledge: model.acknowledgeCollectorProblems
+                )
+            }
             ToolbarItem(placement: .automatic) {
                 Toggle(isOn: $pinned) {
                     Label(pinned ? "取消置顶" : "置顶窗口", systemImage: pinned ? "pin.fill" : "pin")
@@ -42,7 +74,6 @@ struct MainWindow: View {
             model.refresh()
             selection = storedSelection.isEmpty ? nil : storedSelection
         }
-        .onDisappear { MainWindowBehavior.windowClosed() }
         .onChange(of: selection) { _, value in storedSelection = value ?? "" }
         .onChange(of: model.report?.profiles.map(\.profileID) ?? []) { _, ids in
             // 列表暂时为空（查询失败/正在刷新）时保持当前选择，别把详情页拆掉重建。
@@ -79,21 +110,6 @@ struct MainWindow: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItemGroup {
-                Menu {
-                    Button("新建配置档…") { creating = true }
-                    Divider()
-                    Button("导入现有 Knodo 沙箱") { model.importKnodo() }
-                } label: {
-                    Label("添加", systemImage: "plus")
-                } primaryAction: {
-                    creating = true
-                }
-                .disabled(!model.helperReachable)
-                .help("新建配置档")
-            }
-        }
     }
 
     @ViewBuilder private var detail: some View {
@@ -109,8 +125,10 @@ struct MainWindow: View {
                                            description: Text("或者点工具栏的 + 新建，开始为命令行工具或 Agent 设定权限。"))
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         }
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
+        .clipped()
     }
 
     @ViewBuilder private var notices: some View {
@@ -121,6 +139,7 @@ struct MainWindow: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 14)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -129,22 +148,64 @@ struct MainWindow: View {
         if let error = model.lastError {
             items.append(Notice(kind: .error, text: error, actionTitle: "关闭") { model.lastError = nil })
         }
+        if let warning = model.lastWarning {
+            items.append(Notice(kind: .warning, text: "上次操作提示：" + warning, actionTitle: "关闭") { model.lastWarning = nil })
+        }
         if !model.helperReachable && model.report != nil {
             items.append(Notice(kind: .warning, text: "暂时连不上 Helper，下面是上次的状态，修改不会生效。正在重试…"))
         }
-        if model.helperReachable {
-            if model.needsFullDiskAccess {
-                items.append(Notice(kind: .warning,
-                                    text: "采集器没有完全磁盘访问权限。在“隐私与安全性 > 完全磁盘访问”中添加 \(AgentGuardConfig.collectorPath)（按 ⌘⇧G 输入路径）。",
-                                    actionTitle: "复制路径") { Pasteboard.copy(AgentGuardConfig.collectorPath) })
-            }
-            let others = model.helperProblems.filter { !$0.contains("未授权") }
-            if !others.isEmpty {
-                items.append(Notice(kind: .warning, text: "采集器：" + others.joined(separator: "；") + "。未观测到不代表没有发生。",
-                                    actionTitle: "已知悉", action: model.acknowledgeCollectorProblems))
-            }
-        }
         return items
+    }
+}
+
+private struct CollectorTipsButton: View {
+    let problems: [String]
+    let reachable: Bool
+    let acknowledge: () -> Void
+    @State private var showingTips = false
+
+    private var hasProblems: Bool { reachable && !problems.isEmpty }
+    private var needsFullDiskAccess: Bool { problems.contains { $0.contains("未授权") } }
+
+    var body: some View {
+        Button { showingTips.toggle() } label: {
+            Image(systemName: hasProblems ? "info.circle.fill" : "info.circle")
+                .foregroundStyle(hasProblems ? Color.orange : Color.secondary)
+        }
+        .accessibilityLabel(hasProblems ? "活动记录提示，有采集异常" : "活动记录说明")
+        .help(hasProblems ? "活动记录有提示，点此查看" : "活动记录说明")
+        .popover(isPresented: $showingTips, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("活动记录说明").font(.headline)
+                if !reachable {
+                    Text("暂时无法获取采集状态，请稍后重试。")
+                } else if hasProblems {
+                    ForEach(problems, id: \.self) { problem in
+                        Text(problem).foregroundStyle(.orange)
+                    }
+                    Text("活动记录和待定项可能不完整，已生效的权限限制继续执行。")
+                } else {
+                    Text("当前未报告采集异常。活动记录和待定项只包含已观测到的行为。")
+                }
+                Text("遗漏数量统计整台 Mac 的系统活动，在本次监测期间累计。清除历史提示后重新计数，新增问题会再次提示。")
+                    .foregroundStyle(.secondary)
+                if reachable && needsFullDiskAccess {
+                    Text("请在“隐私与安全性 > 完全磁盘访问”中添加采集器，选择文件时按 ⌘⇧G 输入路径。")
+                    Button("复制采集器路径") { Pasteboard.copy(AgentGuardConfig.collectorPath) }
+                }
+                if hasProblems {
+                    Button("清除历史提示") {
+                        acknowledge()
+                        showingTips = false
+                    }
+                    .help("清除累计遗漏和已恢复的中断提示，当前故障仍保留")
+                }
+            }
+            .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(16)
+            .frame(width: 320, alignment: .leading)
+        }
     }
 }
 
@@ -228,16 +289,15 @@ struct NewProfileSheet: View {
     @State private var program: String?
     @State private var runsInBackground = false
     @State private var arguments = ""
-    @State private var originalLabel = ""
+    @State private var runAtLogin = false
 
     private var nameIsValid: Bool { ProfileID.isValid(name) }
     private var nameTaken: Bool { model.report?.profiles.contains { $0.profileID == name } ?? false }
 
     private var launch: LaunchSettings? {
-        guard runsInBackground, let program else { return nil }
-        let label = originalLabel.trimmingCharacters(in: .whitespaces)
-        return LaunchSettings(executable: program, arguments: arguments.split(separator: " ").map(String.init), workingDirectory: nil,
-                              originalLabel: label.isEmpty ? nil : label, restartOnCleanExit: false)
+        guard runsInBackground, let program, let parsed = try? LaunchArguments.parse(arguments) else { return nil }
+        return LaunchSettings(executable: program, arguments: parsed, workingDirectory: nil,
+                              originalLabel: nil, restartOnCleanExit: false, runAtLogin: runAtLogin)
     }
 
     var body: some View {
@@ -270,25 +330,26 @@ struct NewProfileSheet: View {
                 HStack(spacing: 8) {
                     if let program {
                         PathLabel(path: program).frame(maxWidth: .infinity, alignment: .leading)
-                        Button("更换…") { self.program = model.chooseExecutable() ?? program }
+                        Button("更换…") { Task { if let picked = await model.chooseExecutable() { self.program = picked } } }
                         Button { self.program = nil } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.borderless).foregroundStyle(.secondary).help("不指定程序")
                     } else {
                         Text("可选。指定后，没有经过 AgentGuard 直接运行它会被报告。").font(.callout).foregroundStyle(.secondary)
                         Spacer(minLength: 8)
-                        Button("选择…") { program = model.chooseExecutable() }
+                        Button("选择…") { Task { if let picked = await model.chooseExecutable() { program = picked } } }
                     }
                 }
                 if program != nil {
                     Picker("启动方式", selection: $runsInBackground) {
                         Text("命令行工具（guard run）").tag(false)
-                        Text("后台程序（接管启动项）").tag(true)
+                        Text("后台程序（在界面启动）").tag(true)
                     }
                     .pickerStyle(.radioGroup)
                     if runsInBackground {
-                        TextField("启动参数（可选，空格分隔）", text: $arguments).textFieldStyle(.roundedBorder)
-                        TextField("要替换的原启动项 label（可选），例如 com.example.agent", text: $originalLabel).textFieldStyle(.roundedBorder)
-                        Text("创建后在配置档的“启动项”里点“接管启动项”，以后由 AgentGuard 在沙箱内启动它。程序需要在前台运行，不要自己转到后台。")
+                        TextField("启动参数（可选，带空格的参数用引号包住）", text: $arguments).textFieldStyle(.roundedBorder)
+                        Toggle("登录 Mac 时自动启动", isOn: $runAtLogin)
+                        if (try? LaunchArguments.parse(arguments)) == nil { Text("启动参数的引号或反斜杠不完整").font(.caption).foregroundStyle(.red) }
+                        Text("创建后在“启动方式”里点“启动程序”。如需替换已有自启任务，可在“编辑设置”中直接选择。需要终端输入的工具请选命令行方式。")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -321,7 +382,7 @@ struct NewProfileSheet: View {
                     isPresented = false
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!nameIsValid || nameTaken)
+                .disabled(!nameIsValid || nameTaken || (runsInBackground && (try? LaunchArguments.parse(arguments)) == nil))
             }
         }
         .padding(24)

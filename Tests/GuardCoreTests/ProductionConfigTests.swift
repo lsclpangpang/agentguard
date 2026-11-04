@@ -38,8 +38,23 @@ import Testing
         #expect(sbpl.contains("(deny file-write* (subpath \"/Users/me/Library/LaunchAgents\"))"))
     }
 
-    @Test func identifiersAreConsistent() {
-        #expect(AgentGuardConfig.helperServiceName == "com.lsclpangpang.agentguard.helper")
+    /// 用户点「文件访问 > 添加 > 只读…」选到受保护目录时，Helper 只回一个 `compile_error`。
+    /// 这段话就是 App 用同一份生产 environment 本地重编译换回来的解释 —— 它必须指名两条路径，
+    /// 否则界面又只剩一句“配置档无效”。
+    @Test func productionConfigExplainsAGrantOnAProtectedPath() throws {
+        let config = AgentGuardConfig(home: "/Users/me", uid: 501, homebrewPrefix: "/opt/homebrew")
+        let profile = F.profile(files: [FileGrant(path: config.configRoot + "/profiles", kind: .directory, access: .readOnly)])
+        do {
+            _ = try PolicyCompiler(environment: config.environment)
+                .compile(profile, catalog: TemplateCatalog(config.templates))
+            Issue.record("落在 protectedPaths 里的授权必须被拒绝")
+        } catch let error as CompileError {
+            #expect(error.message.contains(config.configRoot + "/profiles"))
+            #expect(error.message.contains("与受保护目录 \(config.configRoot) 重叠"))
+        }
+    }
+
+    @Test func identifiersAreConsistent() {        #expect(AgentGuardConfig.helperServiceName == "com.lsclpangpang.agentguard.helper")
         #expect(AgentGuardConfig.signingIdentifier(.app) == "com.lsclpangpang.agentguard")
         #expect(AgentGuardConfig.signingIdentifier(.cli) == "com.lsclpangpang.agentguard.cli")
         #expect(AgentGuardConfig.signingIdentifier(.launcher) == "com.lsclpangpang.agentguard.launcher")

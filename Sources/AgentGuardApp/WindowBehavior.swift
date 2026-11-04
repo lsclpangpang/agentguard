@@ -19,24 +19,44 @@ struct WindowAccessor: NSViewRepresentable {
 
 enum MainWindowBehavior {
     static let pinnedKey = "pinMainWindow"
+    private static var closeObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
 
     /// A menu bar app has no Dock icon or Cmd-Tab entry, so its window is lost once it falls behind
     /// another app. Behave like a regular app while the main window is open.
     static func windowOpened() {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
     }
 
-    static func windowClosed() {
-        NSApp.setActivationPolicy(.accessory)
+    /// Observe the actual close, not SwiftUI disappearance (which also occurs for sheet rebuilds).
+    /// Exclude the closing window even if AppKit has not yet updated isVisible in this run loop.
+    private static func observeClose(of window: NSWindow) {
+        let id = ObjectIdentifier(window)
+        guard closeObservers[id] == nil else { return }
+        closeObservers[id] = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak window] _ in
+            if let token = closeObservers.removeValue(forKey: id) { NotificationCenter.default.removeObserver(token) }
+            DispatchQueue.main.async {
+                let hasOtherWindow = NSApp.windows.contains {
+                    $0 !== window && ($0.isVisible || $0.isMiniaturized) && $0.styleMask.contains(.titled) && !($0 is NSPanel) && $0.sheetParent == nil
+                }
+                if !hasOtherWindow && NSApp.activationPolicy() != .accessory { NSApp.setActivationPolicy(.accessory) }
+            }
+        }
     }
 
+    /// `configure` runs from `updateNSView`, i.e. on every single SwiftUI update. Writing `level`
+    /// and `collectionBehavior` unconditionally therefore made AppKit re-evaluate the titlebar and
+    /// the content layout constantly, including mid-pass while a split view was being laid out.
+    /// Only write what actually differs.
     static func apply(pinned: Bool, to window: NSWindow) {
-        window.level = pinned ? .floating : .normal
-        window.hidesOnDeactivate = false
+        observeClose(of: window)
+        let level: NSWindow.Level = pinned ? .floating : .normal
+        if window.level != level { window.level = level }
+        if window.hidesOnDeactivate { window.hidesOnDeactivate = false }
         if pinned {
-            window.collectionBehavior.insert(.fullScreenAuxiliary)
-        } else {
+            if !window.collectionBehavior.contains(.fullScreenAuxiliary) {
+                window.collectionBehavior.insert(.fullScreenAuxiliary)
+            }
+        } else if window.collectionBehavior.contains(.fullScreenAuxiliary) {
             window.collectionBehavior.remove(.fullScreenAuxiliary)
         }
     }

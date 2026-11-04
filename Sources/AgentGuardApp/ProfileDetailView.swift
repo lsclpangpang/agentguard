@@ -32,7 +32,7 @@ struct ProfileDetailView: View {
                     FilesCard(profile: profile)
                     TemplatesCard(profile: profile)
                     ProgramsAndNetworkCard(profile: profile)
-                    if profile.launch != nil { LaunchCard(profile: profile) }
+                    LaunchCard(profile: profile)
                     DeleteCard(profile: profile, running: !(model.status(for: profileID)?.runningInstances.isEmpty ?? true))
                 }
                 .padding(20)
@@ -170,7 +170,8 @@ private struct FilesCard: View {
                 Text("还没有手动添加的目录").font(.callout).foregroundStyle(.secondary).padding(.vertical, 4)
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(profile.files.enumerated()), id: \.offset) { index, grant in
+                    // 用条目本身做标识：按下标的话，插到中间会让它后面的每一行都被当成新行重建。
+                    ForEach(Array(profile.files.enumerated()), id: \.element) { index, grant in
                         if index > 0 { Divider().padding(.leading, 46) }
                         FileRow(grant: grant,
                                 remove: { model.removeFile(grant, from: profile.id) },
@@ -343,7 +344,7 @@ private struct AddProgramSheet: View {
             }
             HStack {
                 Button("选择文件…") {
-                    if let picked = model.pickFile() { path = picked }
+                    Task { if let picked = await model.pickFile() { path = picked } }
                 }
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -410,7 +411,7 @@ private struct DeleteCard: View {
 private struct ProgramsAndNetworkCard: View {
     @EnvironmentObject var model: AppModel
     let profile: Profile
-    @State private var newPort = ""
+    @State private var addingPort = false
 
     var body: some View {
         Card(title: "程序与网络", systemImage: "network",
@@ -451,13 +452,7 @@ private struct ProgramsAndNetworkCard: View {
                             .fixedSize()
                         }
                     }
-                    HStack(spacing: 8) {
-                        TextField("端口", text: $newPort)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 80)
-                            .onSubmit(addPort)
-                        Button("添加", action: addPort).disabled(Int(newPort).map { !(1...65535).contains($0) } ?? true)
-                    }
+                    Button("添加端口…") { addingPort = true }
                 }
 
                 Divider()
@@ -473,63 +468,52 @@ private struct ProgramsAndNetworkCard: View {
                 .toggleStyle(.switch)
             }
         }
-    }
-
-    private func addPort() {
-        guard let port = Int(newPort), (1...65535).contains(port) else { return }
-        model.edit(profile.id) { $0.network.loopbackTCPConnect.append(port) }
-        newPort = ""
+        // Keep text fields out of the scrolling detail: AppKit restores focus after a file panel
+        // or confirmation sheet closes and scrolls the detail to reveal the field.
+        .sheet(isPresented: $addingPort) {
+            AddPortSheet { port in
+                addingPort = false
+                model.edit(profile.id) { $0.network.loopbackTCPConnect.append(port) }
+            }
+        }
     }
 }
 
-private struct LaunchCard: View {
-    @EnvironmentObject var model: AppModel
-    let profile: Profile
+private struct AddPortSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var input = ""
+    let add: (Int) -> Void
 
-    var body: some View {
-        if let launch = profile.launch {
-            Card(title: "启动项", systemImage: "power",
-                 subtitle: "接管后由 AgentGuard 启动器在沙箱内启动，登录自启和异常重启都经过同一入口。") {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(([PathLabel.abbreviate(launch.executable)] + launch.arguments).joined(separator: " "))
-                        .font(.system(.callout, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
-                    if !(model.status(for: profile.id)?.detachedInstances.isEmpty ?? true) {
-                        Notice(kind: .warning,
-                               text: "启动入口已经退出，但它启动的进程还在运行。launchd 只看护入口进程，这些进程崩溃后不会被自动拉起。请让入口脚本用 exec 在前台运行目标程序，不要用 & 或 nohup 把它放到后台。")
-                    }
-                    if let original = launch.originalLabel {
-                        Label("原启动项：\(original)", systemImage: "arrow.uturn.backward").font(.callout).foregroundStyle(.secondary)
-                    }
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 12) { actions }
-                        VStack(alignment: .leading, spacing: 10) { actions }
-                    }
-                }
-            }
-        }
+    private var port: Int? {
+        guard let value = Int(input.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...65535).contains(value) else { return nil }
+        return value
     }
 
-    private var isRestarting: Bool { model.restartingProfiles.contains(profile.id) }
-
-    @ViewBuilder private var actions: some View {
-        if isRestarting {
-            // 重启是“杀进程 → 重新 bootstrap → 等实例注册”的一整段，中间界面必须说话。
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("正在重启：结束旧实例，等待新实例注册…").foregroundStyle(.secondary)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("添加本机 TCP 端口").font(.headline)
+            Text("允许连接这个端口上的本机服务。端口范围为 1–65535。")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("端口，例如 8080", text: $input)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(submit)
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("添加", action: submit)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(port == nil)
             }
-            .accessibilityElement(children: .combine)
-        } else {
-            Button("接管启动项") { model.installLaunchAgent(profile.id) }
-            Button("重启受管实例") { model.restartManaged(profile.id) }
-                .buttonStyle(.borderedProminent)
-            Button("停止并移除管控") { model.removeManagement(profile.id, restoreOriginal: false) }
-            Button("恢复原启动项…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }
         }
+        .padding(20)
+        .frame(width: 360)
+    }
+
+    private func submit() {
+        guard let port else { return }
+        add(port)
     }
 }
 

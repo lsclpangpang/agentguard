@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var report: StatusReport?
     @Published var helperReachable = false
     @Published var lastError: String?
+    @Published var lastWarning: String?
     @Published var pending: [String: [PendingItem]] = [:]
     @Published var revision = 0
     /// Install progress shown in the Helper banner; cleared as soon as the Helper answers.
@@ -64,23 +65,27 @@ final class AppModel: ObservableObject {
     // MARK: Helper
 
     func refresh() {
+        Task { _ = await refreshReport() }
+    }
+
+    /// Returns this request's snapshot, rather than the previous report cached by the UI.
+    private func refreshReport(timeout: TimeInterval = 60) async -> StatusReport? {
+        let status = await Task.detached {
+            try? HelperClient().send(.status, timeout: timeout)
+        }.value
+        if case let .status(report) = status {
+            self.report = report
+            helperReachable = true
+            installNotice = nil
+        } else {
+            // Preserve the last report during a failed query so the selected detail is not rebuilt.
+            helperReachable = false
+            repairStaleRegistrationIfNeeded()
+        }
+        revision += 1
+        guard case let .status(report) = status else { return nil }
+        // Pending-item retrieval must not delay a caller waiting for the actual status snapshot.
         Task.detached {
-            let status = try? HelperClient().send(.status)
-            await MainActor.run {
-                if case let .status(report) = status {
-                    self.report = report
-                    self.helperReachable = true
-                    self.installNotice = nil
-                } else {
-                    // 不要在这里清空 report：一次查询失败就把配置档列表变空，界面会退回
-                    // “选择一个配置档”，再恢复时详情页整棵重建、滚动位置归零——看起来就是
-                    // 莫名跳回顶部。保留上次的报告，只用可达性表达当前状态。
-                    self.helperReachable = false
-                    self.repairStaleRegistrationIfNeeded()
-                }
-                self.revision += 1
-            }
-            guard case let .status(report) = status else { return }
             for profile in report.profiles {
                 let items = try? HelperClient().send(.pendingItems(profileID: profile.profileID))
                 if case let .pendingItems(list) = items {
@@ -88,6 +93,7 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        return report
     }
 
     func installHelper() {
@@ -188,7 +194,9 @@ final class AppModel: ObservableObject {
                 logger.debug("submit: 开始 propose \(profile.id, privacy: .public) rev\(profile.revision) mode=\(String(describing: profile.mode), privacy: .public)")
                 let proposal = try client.send(.proposeChange(profile: profile))
                 logger.debug("submit: propose 返回 \(String(describing: proposal).prefix(120), privacy: .public)")
-                guard case let .pending(info) = proposal else { throw Self.failure(proposal) }
+                guard case let .pending(info) = proposal else {
+                    throw Self.failure(proposal, diagnosis: Self.compileDiagnosis(for: profile, config: self.config))
+                }
                 if info.summary.isEmpty {
                     logger.debug("submit: 差异为空，标记没有变化")
                     await MainActor.run { self.lastError = unchangedHint ?? "没有变化" }
@@ -202,7 +210,9 @@ final class AppModel: ObservableObject {
                                                          prompt: "AgentGuard 将为 \(profile.id) 扩大权限：\n" + info.summary.joined(separator: "\n"))
                 }
                 let result = try client.send(.approveChange(changeID: info.id, digest: info.digest, authorization: token))
-                guard case .applied = result else { throw Self.failure(result) }
+                guard case .applied = result else {
+                    throw Self.failure(result, diagnosis: Self.compileDiagnosis(for: profile, config: self.config))
+                }
                 await MainActor.run { self.lastError = nil }
             } catch {
                 logger.error("submit: 失败 \(String(describing: error), privacy: .public)")
@@ -219,6 +229,14 @@ final class AppModel: ObservableObject {
         submit(profile, unchangedHint: unchangedHint)
     }
 
+    /// A newly added parent directory makes narrower child grants redundant. Normalize at the
+    /// user-edit boundary; callers that bypass this path and templates still go through the
+    /// compiler's stricter nested read-only validation.
+    func normalizedFileGrants(_ grants: [FileGrant]) -> [FileGrant] {
+        (try? FileGrantMerger.normalize(grants, resolver: config.environment.resolver,
+                                        caseInsensitive: config.environment.caseInsensitive)) ?? grants
+    }
+
     /// `program` is what the profile manages; `launch` is set only when it should run as a background item.
     func createProfile(id: String, templateIDs: Set<String>, program: String? = nil, launch: LaunchSettings? = nil) {
         guard ProfileID.isValid(id) else {
@@ -231,15 +249,33 @@ final class AppModel: ObservableObject {
     }
 
     /// Shows the file panel without checking the result; nil when the user cancels.
-    func pickFile() -> String? {
+    func pickFile() async -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.treatsFilePackagesAsDirectories = true
         panel.message = "选择要管控的可执行文件。按 ⌘⇧G 可以输入路径，例如 /opt/homebrew/bin/claude"
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        guard let url = await Self.run(panel) else { return nil }
         return url.path
+    }
+
+    /// Presents a sheet when the host is available, otherwise an asynchronous standalone panel.
+    /// Avoids a nested application-modal session while SwiftUI is presenting its own sheets.
+    @MainActor static func run(_ panel: NSOpenPanel) async -> URL? {
+        let host = NSApp.keyWindow
+        if let host, host.sheetParent == nil, host.attachedSheet == nil {
+            return await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+                panel.beginSheetModal(for: host) { response in
+                    continuation.resume(returning: response == .OK ? panel.url : nil)
+                }
+            }
+        }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+            panel.begin { response in
+                continuation.resume(returning: response == .OK ? panel.url : nil)
+            }
+        }
     }
 
     /// Checks a program path and returns the real path to store, or the message to show.
@@ -248,8 +284,8 @@ final class AppModel: ObservableObject {
     }
 
     /// Asks for an executable; nil when the user cancels or picks something that can't be managed.
-    func chooseExecutable() -> String? {
-        guard let path = pickFile() else { return nil }
+    func chooseExecutable() async -> String? {
+        guard let path = await pickFile() else { return nil }
         switch validateProgram(path) {
         case let .success(real): return real
         case let .failure(error):
@@ -288,15 +324,20 @@ final class AppModel: ObservableObject {
     }
 
     func addFolder(to id: String, access: Access) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        var isDirectory: ObjCBool = false
-        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
-        let sensitive = SensitivePaths(home: config.home).overlapsSensitive(url.path)
-        edit(id) { $0.files.append(FileGrant(path: url.path, kind: isDirectory.boolValue ? .directory : .file, access: access, readsSecrets: sensitive)) }
+        Task {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = true
+            panel.allowsMultipleSelection = false
+            panel.message = "选择要放行的目录或文件。按 ⌘⇧G 可以输入路径。"
+            guard let url = await Self.run(panel) else { return }
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            let sensitive = SensitivePaths(home: config.home).overlapsSensitive(url.path)
+            let grant = FileGrant(path: url.path, kind: isDirectory.boolValue ? .directory : .file,
+                                  access: access, readsSecrets: sensitive)
+            edit(id) { profile in profile.files = normalizedFileGrants(profile.files + [grant]) }
+        }
     }
 
     func accept(_ item: PendingItem, for id: String) {
@@ -307,7 +348,8 @@ final class AppModel: ObservableObject {
                     profile.templates.append(TemplateRef(id: template.id, version: template.version))
                 }
             case let .file(path, kind, access):
-                profile.files.append(FileGrant(path: path, kind: kind, access: access, readsSecrets: item.sensitive))
+                profile.files = normalizedFileGrants(profile.files + [FileGrant(path: path, kind: kind, access: access,
+                                                                                readsSecrets: item.sensitive)])
             case let .exec(path):
                 profile.exec.append(ExecGrant(path: path))
             case let .loopbackPort(port):
@@ -348,31 +390,44 @@ final class AppModel: ObservableObject {
 
     /// 改完规则后旧进程还在按老沙箱跑，重启后新修订才算生效。
     func restartManaged(_ id: String) {
+        launchManaged(id, restart: true)
+    }
+
+    private func launchManaged(_ id: String, restart: Bool) {
         Task {
-            guard await askConfirmation("重启 \(id) 的受管实例", ["结束当前实例的进程", "按已保存的修订重新启动"]) else { return }
+            guard let launch = profile(id)?.launch else { return }
+            var lines = ["按已保存的权限启动：" + LaunchArguments.format([launch.executable] + launch.arguments),
+                         launch.runAtLogin ? "启用登录自启，后续登录也通过 AgentGuard 启动" : "仅在本次登录中启动，不添加登录自启"]
+            if !(status(for: id)?.runningInstances.isEmpty ?? true) { lines.insert("结束此配置当前运行的受管实例", at: 0) }
+            if let original = launch.originalLabel, status(for: id)?.launchAgent?.canRestoreOriginal != true {
+                lines.append("备份并替换原自启任务：\(original)")
+            }
+            guard await askConfirmation("\(restart ? "重启" : "启动") \(id)", lines) else { return }
             restartingProfiles.insert(id)
             defer { restartingProfiles.remove(id) }
-            await sendAsync(.restartManagedInstance(profileID: id))
+            guard await sendAsync(restart ? .restartManagedInstance(profileID: id) : .installLaunchAgent(profileID: id), refreshAfter: false) else {
+                _ = await refreshReport()
+                return
+            }
             // 实例注册来自启动器连上 Helper，通常几百毫秒；最多等 12 秒再放弃提示。
-            for _ in 0..<24 {
-                if report?.profiles.first(where: { $0.profileID == id })?.runningInstances.isEmpty == false { break }
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                refresh()
+            let deadline = Date().addingTimeInterval(12)
+            while !Task.isCancelled {
+                let remaining = deadline.timeIntervalSinceNow
+                guard remaining > 0, let snapshot = await refreshReport(timeout: remaining) else { break }
+                if snapshot.profiles.first(where: { $0.profileID == id })?.revisionState == .applied(running: true) { break }
+                do { try await Task.sleep(nanoseconds: 500_000_000) } catch { break }
             }
         }
     }
 
     func installLaunchAgent(_ id: String) {
-        Task {
-            guard await askConfirmation("接管 \(id) 的启动项", ["停止原启动项并备份", "以后由 AgentGuard 启动器在沙箱内启动"]) else { return }
-            send(.installLaunchAgent(profileID: id))
-        }
+        launchManaged(id, restart: false)
     }
 
     func removeManagement(_ id: String, restoreOriginal: Bool) {
-        let lines = restoreOriginal ? ["停止受管实例", "恢复原启动项：之后将无限制运行"] : ["停止受管实例并移除启动项", "不恢复原启动项"]
+        let lines = restoreOriginal ? ["停止此配置的受管程序，并取消 AgentGuard 的自启安排", "恢复备份的原启动方式，之后不再通过 AgentGuard 加载这份权限配置"] : ["停止此配置的受管程序，并取消登录自启", "保留权限和启动设置，以后可再次点“启动程序”", "保留原启动方式的备份，本次不恢复它"]
         Task {
-            guard await askConfirmation("移除 \(id) 的管控", lines) else { return }
+            guard await askConfirmation(restoreOriginal ? "恢复 \(id) 的原启动方式" : "停止 \(id) 并取消自启", lines) else { return }
             removeManagementConfirmed(id, restoreOriginal: restoreOriginal)
         }
     }
@@ -396,20 +451,50 @@ final class AppModel: ObservableObject {
         Task.detached { await self.sendAsync(request) }
     }
 
-    nonisolated private func sendAsync(_ request: HelperRequest) async {
+    @discardableResult
+    nonisolated private func sendAsync(_ request: HelperRequest, refreshAfter: Bool = true) async -> Bool {
+        var succeeded = false
         do {
             let response = try HelperClient().send(request)
             if case .failure = response { throw Self.failure(response) }
-            await MainActor.run { self.lastError = nil }
+            await MainActor.run {
+                self.lastError = nil
+                if case let .completed(warnings) = response { self.lastWarning = warnings.joined(separator: "\n") }
+                else { self.lastWarning = nil }
+            }
+            succeeded = true
         } catch {
             await MainActor.run { self.lastError = "\(error)" }
         }
-        await MainActor.run { self.refresh() }
+        if refreshAfter { await MainActor.run { self.refresh() } }
+        return succeeded
     }
 
-    nonisolated static func failure(_ response: HelperResponse) -> Error {
-        if case let .failure(code) = response { return PlatformError.helper(HelperFailure.message(for: code)) }
+    nonisolated static func failure(_ response: HelperResponse, diagnosis: String? = nil) -> Error {
+        if case let .failure(code) = response {
+            if code == "compile_error", let diagnosis { return PlatformError.helper(diagnosis) }
+            return PlatformError.helper(HelperFailure.message(for: code))
+        }
         return PlatformError.helper("意外的响应")
+    }
+
+    /// Recovers the concrete reason for a refusal that the Helper can only report as `compile_error`.
+    ///
+    /// Every `CompileError` collapses to that one code before it leaves the Helper, so the grant
+    /// path and the protected directory it collided with are lost. Recompiling the same revision
+    /// here puts them back. No diagnosis is offered when this compile succeeds: that means the App
+    /// and the Helper see the filesystem differently (the Helper runs as root), and a wrong reason
+    /// would be worse than the generic one.
+    nonisolated static func compileDiagnosis(for profile: Profile, config: AgentGuardConfig) -> String? {
+        do {
+            _ = try PolicyCompiler(environment: config.environment)
+                .compile(profile, catalog: TemplateCatalog(config.templates))
+            return nil
+        } catch let error as CompileError {
+            return "没有保存：\(error.message)"
+        } catch {
+            return nil
+        }
     }
 
     /// 弹出一个窗口内的确认 sheet，并等到用户作答。
