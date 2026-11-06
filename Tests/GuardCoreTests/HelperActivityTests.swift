@@ -92,7 +92,7 @@ import Testing
         #expect(s.handle(.disableLaunchItem(profileID: "knodo", label: "com.example.agent", path: "/Users/me/Library/LaunchAgents/a.plist", authorization: nil),
                          caller: F.appCaller, process: appProcess) == .failure(code: "authorization_missing"))
         #expect(s.handle(.disableLaunchItem(profileID: "knodo", label: "com.example.agent", path: "/Users/me/Library/LaunchAgents/a.plist", authorization: token),
-                         caller: F.appCaller, process: appProcess) == .disableLaunchItem(label: "com.example.agent", path: "/Users/me/Library/LaunchAgents/a.plist"))
+                         caller: F.appCaller, process: appProcess) == .disableLaunchItem(profileID: "knodo", label: "com.example.agent", path: "/Users/me/Library/LaunchAgents/a.plist"))
     }
 
     @Test func uninstallListsEveryProfile() throws {

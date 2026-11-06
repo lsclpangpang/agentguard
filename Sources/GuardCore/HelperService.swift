@@ -192,7 +192,7 @@ public enum HelperResponse: Codable, Equatable, Sendable {
     case stopManaged(profileID: String)
     /// The platform layer moves the managed launch item to match the saved login setting.
     case relocateLaunchAgent(profileID: String, runAtLogin: Bool)
-    case disableLaunchItem(label: String, path: String)
+    case disableLaunchItem(profileID: String, label: String, path: String)
     case restoreLaunchItem(label: String)
     case activity(ActivityLog)
     case uninstall(targets: [UninstallTarget])
@@ -492,7 +492,7 @@ public final class HelperService {
                     throw ApprovalError.authorizationMissing
                 }
                 log(profileID, .decision, "停用其他启动入口 \(label)", [path])
-                return .disableLaunchItem(label: label, path: path)
+                return .disableLaunchItem(profileID: profileID, label: label, path: path)
             case let .restoreLaunchItem(label, authorization):
                 try require(role, in: [.app])
                 guard PolicyCompiler.isSafeLaunchLabel(label) else { throw Failure(code: "invalid_launch_item") }

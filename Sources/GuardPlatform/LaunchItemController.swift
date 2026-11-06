@@ -304,7 +304,7 @@ public struct LaunchItemController {
 
     /// Backs up another launch item, unloads it and removes it from its directory, so it no longer
     /// starts the program outside AgentGuard. The backup lets `restoreDisabled` put it back exactly.
-    public func disable(label: String, path: String) throws {
+    public func disable(label: String, path: String, profileID: String) throws {
         let item = try files.original(label: label, selectedPath: path)
         let state = try registration(label)
         let saved = Saved(item: item, data: try Data(contentsOf: URL(fileURLWithPath: item.path)), metadata: try Metadata(path: item.path),
@@ -317,7 +317,8 @@ public struct LaunchItemController {
         var created: [String] = []
         do {
             for (file, data, metadata) in [(base, saved.data, privateMetadata), (base + ".metadata", try JSONEncoder().encode(saved.metadata), privateMetadata),
-                                           (base + ".location", Data(item.path.utf8), publicMetadata)] {
+                                           (base + ".location", Data(item.path.utf8), publicMetadata),
+                                           (base + ".profile", Data(profileID.utf8), publicMetadata)] {
                 try writeNew(data, path: file, metadata: metadata)
                 created.append(file)
             }
@@ -332,12 +333,18 @@ public struct LaunchItemController {
         }
     }
 
-    /// Labels of launch items disabled by `disable`, with the location each came from.
-    public func disabledItems() -> [(label: String, location: String)] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: disabledDirectory)) ?? []
+    /// Launch items disabled by `disable`: label, where each came from and the profile it was disabled for.
+    public func disabledItems() -> [DisabledLaunchEntry] {
+        Self.disabledItems(in: disabledDirectory)
+    }
+
+    /// Readable without privileges: the App lists these files to show what was set aside.
+    public static func disabledItems(in directory: String) -> [DisabledLaunchEntry] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
         return names.filter { $0.hasSuffix(".plist") }.sorted().compactMap { name in
-            let location = try? String(contentsOfFile: disabledDirectory + "/" + name + ".location", encoding: .utf8)
-            return location.map { (String(name.dropLast(6)), $0) }
+            guard let location = try? String(contentsOfFile: directory + "/" + name + ".location", encoding: .utf8) else { return nil }
+            let profile = try? String(contentsOfFile: directory + "/" + name + ".profile", encoding: .utf8)
+            return DisabledLaunchEntry(label: String(name.dropLast(6)), location: location, profileID: profile)
         }
     }
 
@@ -357,7 +364,7 @@ public struct LaunchItemController {
             try? FileManager.default.removeItem(atPath: destination)
             throw LaunchItemError.operationFailed
         }
-        for suffix in ["", ".location", ".metadata"] { try? FileManager.default.removeItem(atPath: base + suffix) }
+        for suffix in ["", ".location", ".metadata", ".profile"] { try? FileManager.default.removeItem(atPath: base + suffix) }
     }
 
     @discardableResult

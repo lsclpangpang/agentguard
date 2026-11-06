@@ -300,8 +300,8 @@ final class HelperCore {
             } catch {
                 return .failure(code: "startup_error:" + String(describing: error))
             }
-        case let .disableLaunchItem(label, path):
-            do { try launchController(config: config, owner: owner).disable(label: label, path: path) }
+        case let .disableLaunchItem(profileID, label, path):
+            do { try launchController(config: config, owner: owner).disable(label: label, path: path, profileID: profileID) }
             catch { return .failure(code: "startup_error:" + String(describing: error)) }
         case let .restoreLaunchItem(label):
             do { try launchController(config: config, owner: owner).restoreDisabled(label: label) }
