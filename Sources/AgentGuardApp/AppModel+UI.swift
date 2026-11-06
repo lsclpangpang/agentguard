@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import SwiftUI
 import Foundation
 import GuardCore
 
@@ -7,6 +8,15 @@ import GuardCore
 extension AppModel {
     func status(for id: String) -> ProfileStatusReport? {
         report?.profiles.first { $0.profileID == id }
+    }
+
+    /// The revision state to show, unless the Helper has not confirmed it recently.
+    func revisionLabel(_ status: ProfileStatusReport) -> (text: String, tint: Color) {
+        freshness.isStale ? ("状态待确认", .orange) : (status.revisionState.displayText, status.revisionState.tint)
+    }
+
+    func legacyAnalysis(_ profile: Profile) -> LegacyRuleAnalysis {
+        LegacyRuleAnalysis(rules: profile.extraRules, resolver: config.environment.resolver, caseInsensitive: config.environment.caseInsensitive)
     }
 
     var helperProblems: [String] {
@@ -28,7 +38,28 @@ extension AppModel {
     }
 
     func removeFile(_ grant: FileGrant, from id: String) {
-        edit(id) { profile in profile.files.removeAll { $0 == grant } }
+        guard let profile = profile(id), let legacy = legacyRevocation(grant.path, keeping: nil, in: profile) else { return }
+        edit(id, warnings: Self.legacyWarnings(legacy, path: grant.path, revoked: "访问")) { profile in
+            profile.files.removeAll { $0 == grant }
+            profile.extraRules = legacy.extraRules
+        }
+    }
+
+    /// Legacy rules at or below the path are dropped with it; any that reach it from above, or whose
+    /// reach is unknown, are named before the change so it is not mistaken for a full revocation.
+    private func legacyRevocation(_ path: String, keeping access: Access?, in profile: Profile) -> LegacyRevocation? {
+        do {
+            return try LegacyRevocation.revoke(path, keeping: access, from: profile.extraRules, resolver: config.environment.resolver,
+                                               caseInsensitive: config.environment.caseInsensitive)
+        } catch {
+            lastError = "没有保存：" + ((error as? PathError)?.displayText ?? String(describing: error))
+            return nil
+        }
+    }
+
+    nonisolated static func legacyWarnings(_ legacy: LegacyRevocation, path: String, revoked: String) -> [String] {
+        guard !legacy.stillGranting.isEmpty else { return [] }
+        return ["注意：以下旧规则可能仍允许\(revoked) \(path)，这次修改不能保证收回："] + legacy.stillGranting.map { "  " + $0 }
     }
 
     /// 切换单条文件授权的读写级别。放宽（只读 → 读写）会走正常的修订流程：
@@ -41,7 +72,15 @@ extension AppModel {
             let files = try FileGrantMerger.changingAccess(of: grant, to: access, in: profile.files,
                                                            resolver: config.environment.resolver,
                                                            caseInsensitive: config.environment.caseInsensitive)
-            edit(id, unchangedHint: hint) { $0.files = files }
+            guard access == .readOnly else {
+                edit(id, unchangedHint: hint) { $0.files = files }
+                return
+            }
+            guard let legacy = legacyRevocation(grant.path, keeping: .readOnly, in: profile) else { return }
+            edit(id, unchangedHint: hint, warnings: Self.legacyWarnings(legacy, path: grant.path, revoked: "写入")) {
+                $0.files = files
+                $0.extraRules = legacy.extraRules
+            }
         } catch {
             lastError = "没有保存：" + ((error as? PathError)?.displayText ?? String(describing: error))
         }

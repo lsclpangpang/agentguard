@@ -7,9 +7,8 @@ public enum ProtectionState: Equatable, Sendable {
     case unprotectedObserve(until: Date)
     case unknown
 
-    /// Protection is only claimed for a running revision that passed verification on a capable system.
-    public static func derive(mode: Mode, observeUntil: Date?, revision: RevisionState, capabilityPassed: Bool) -> ProtectionState {
-        guard capabilityPassed else { return .unknown }
+    /// Protection is only claimed for a running revision whose sandbox the Helper checked from outside.
+    public static func derive(mode: Mode, observeUntil: Date?, revision: RevisionState) -> ProtectionState {
         switch revision {
         case .applied(running: false): return .stopped
         case .applied(running: true):
@@ -42,6 +41,22 @@ public struct ObjectStatus: Equatable, Sendable {
     }
 }
 
+/// Whether the status on screen still describes the present. Running programs change on their own,
+/// so a report the Helper has not confirmed recently may no longer be true.
+public enum StatusFreshness: Equatable, Sendable {
+    case current
+    case stale(confirmedAt: Date?)
+
+    public static let maxAge: TimeInterval = 15
+
+    public static func evaluate(confirmedAt: Date?, now: Date, maxAge: TimeInterval = maxAge) -> StatusFreshness {
+        guard let confirmedAt, now.timeIntervalSince(confirmedAt) <= maxAge else { return .stale(confirmedAt: confirmedAt) }
+        return .current
+    }
+
+    public var isStale: Bool { self != .current }
+}
+
 public enum StatusLevel: Int, Comparable, Sendable {
     case allGood
     case attention
@@ -51,7 +66,7 @@ public enum StatusLevel: Int, Comparable, Sendable {
 }
 
 /// Menu-bar status. "All good" requires every object protected and applied, nothing pending,
-/// a healthy collector and a passing capability check.
+/// a healthy collector and a status the Helper confirmed recently.
 public struct OverallStatus: Equatable, Sendable {
     public let level: StatusLevel
     public let reasons: [String]
@@ -63,9 +78,9 @@ public struct OverallStatus: Equatable, Sendable {
 
     public static let allGood = OverallStatus(level: .allGood, reasons: [])
 
-    public static func evaluate(objects: [ObjectStatus], collector: CollectorHealth, capabilityCheckPassed: Bool) -> OverallStatus {
+    public static func evaluate(objects: [ObjectStatus], collector: CollectorHealth, freshness: StatusFreshness = .current) -> OverallStatus {
         var findings: [(StatusLevel, String)] = []
-        if !capabilityCheckPassed { findings.append((.problem, "系统能力检查未通过")) }
+        if freshness.isStale { findings.append((.attention, "状态待确认：最近没有收到 Helper 的确认")) }
         if !collector.isHealthy { findings.append((.attention, "采集器状态异常")) }
         for object in objects {
             let name = object.profileID

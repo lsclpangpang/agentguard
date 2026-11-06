@@ -210,6 +210,7 @@ private struct CollectorTipsButton: View {
 }
 
 private struct SidebarRow: View {
+    @EnvironmentObject var model: AppModel
     let profile: ProfileStatusReport
 
     var body: some View {
@@ -218,8 +219,8 @@ private struct SidebarRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(profile.profileID)
                 HStack(spacing: 4) {
-                    Circle().fill(profile.revisionState.tint).frame(width: 6, height: 6)
-                    Text(profile.revisionState.displayText).font(.caption).foregroundStyle(.secondary)
+                    Circle().fill(model.revisionLabel(profile).tint).frame(width: 6, height: 6)
+                    Text(model.revisionLabel(profile).text).font(.caption).foregroundStyle(.secondary)
                 }
             }
         }

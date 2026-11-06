@@ -160,6 +160,7 @@ struct MenuBarView: View {
 }
 
 private struct MenuProfileRow: View {
+    @EnvironmentObject var model: AppModel
     let profile: ProfileStatusReport
     @State private var hovering = false
 
@@ -176,8 +177,8 @@ private struct MenuProfileRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(profile.profileID).font(.system(size: 13, weight: .medium)).lineLimit(1)
                 HStack(spacing: 5) {
-                    Circle().fill(profile.revisionState.tint).frame(width: 6, height: 6)
-                    Text("\(profile.mode.displayName) · \(profile.revisionState.displayText)")
+                    Circle().fill(model.revisionLabel(profile).tint).frame(width: 6, height: 6)
+                    Text("\(profile.mode.displayName) · \(model.revisionLabel(profile).text)")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }

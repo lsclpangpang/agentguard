@@ -35,19 +35,19 @@ import Testing
 
     @Test func protectionDerivation() {
         let until = Date(timeIntervalSince1970: 1)
-        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .applied(running: true), capabilityPassed: true) == .enforced)
-        #expect(ProtectionState.derive(mode: .restrictedLearning, observeUntil: nil, revision: .applied(running: true), capabilityPassed: true) == .restrictedLearning)
-        #expect(ProtectionState.derive(mode: .unprotectedObserve, observeUntil: until, revision: .applied(running: true), capabilityPassed: true) == .unprotectedObserve(until: until))
-        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .applied(running: false), capabilityPassed: true) == .stopped)
-        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .awaitingVerification, capabilityPassed: true) == .unknown)
-        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .unconfirmed(instances: [1]), capabilityPassed: true) == .unknown)
-        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .applied(running: true), capabilityPassed: false) == .unknown)
+        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .applied(running: true)) == .enforced)
+        #expect(ProtectionState.derive(mode: .restrictedLearning, observeUntil: nil, revision: .applied(running: true)) == .restrictedLearning)
+        #expect(ProtectionState.derive(mode: .unprotectedObserve, observeUntil: until, revision: .applied(running: true)) == .unprotectedObserve(until: until))
+        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .applied(running: false)) == .stopped)
+        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .awaitingVerification) == .unknown)
+        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .unconfirmed(instances: [1])) == .unknown)
+        #expect(ProtectionState.derive(mode: .enforce, observeUntil: nil, revision: .verificationFailed) == .unknown)
     }
 
     @Test func stoppedObjectNeedsNoAttention() {
         let s = OverallStatus.evaluate(
             objects: [ObjectStatus(profileID: "knodo", protection: .stopped, revision: .applied(running: false), pendingItems: 0, unmanagedInstances: 0)],
-            collector: CollectorHealth(problems: []), capabilityCheckPassed: true)
+            collector: CollectorHealth(problems: []))
         #expect(s == .allGood)
     }
 }

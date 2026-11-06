@@ -98,7 +98,10 @@ final class HelperCore {
             }
         }
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            self?.queue.async { self?.refreshLaunchStatus() }
+            self?.queue.async {
+                self?.refreshLaunchStatus()
+                self?.service?.verifyInstances()
+            }
         }
         refreshCollector()
     }
@@ -120,9 +123,6 @@ final class HelperCore {
                 if case let .registerInstance(profileID, revision) = request,
                    case let .registered(instance, _) = response {
                     recordInstance(profileID: profileID, instance: instance, revision: revision, root: process)
-                }
-                if case let .reportVerification(instance, passed) = request, case .ok = response {
-                    recordVerification(instance: instance, passed: passed)
                 }
             } else {
                 response = .failure(code: "not_trusted")
@@ -167,7 +167,8 @@ final class HelperCore {
             verifier: SystemAuthorizationVerifier(), settings: config.helperSettings,
             clock: Date.init, makeID: { UUID().uuidString.lowercased() },
             launcherGeneration: (try? CodeSigning.cdhash(atPath: config.helperSettings.launcherPath)).map { String($0.prefix(8)) } ?? "",
-            managedLogDirectory: record.home + "/Library/Logs/AgentGuard"
+            managedLogDirectory: record.home + "/Library/Logs/AgentGuard",
+            probe: SystemSandboxProbe()
         )
         service?.onAcknowledgeCollectorProblems = { [weak self] in
             guard let self else { return }
@@ -190,88 +191,43 @@ final class HelperCore {
 
     /// 实例追踪表在内存里，Helper 一重启就空了，界面会把正在跑的受管对象误报成“已停止”。
     /// 注册时把 root 进程的 pid + 启动时刻落盘，重启后按这两项核对再装回追踪表。
-    private struct InstanceRecord: Codable {
-        var instance: Int
-        var revision: Int
-        var pid: Int32
-        var startTime: UInt64
-        /// 由启动器注册的实例受 launchd 看护；恢复时要把这个事实一起带回来，
-        /// 否则重启 Helper 之后 detached 判定会静默消失。
-        var supervisedByLaunchd: Bool
-        /// 启动器上报的验收结论；没上报过就是 nil。
-        var verified: Bool?
-
-        /// 合成的 Decodable 不认属性默认值，老记录缺这个 key 会直接解码失败、恢复整个失效。
-        init(instance: Int, revision: Int, pid: Int32, startTime: UInt64, supervisedByLaunchd: Bool, verified: Bool?) {
-            self.instance = instance
-            self.revision = revision
-            self.pid = pid
-            self.startTime = startTime
-            self.supervisedByLaunchd = supervisedByLaunchd
-            self.verified = verified
-        }
-
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            instance = try c.decode(Int.self, forKey: .instance)
-            revision = try c.decode(Int.self, forKey: .revision)
-            pid = try c.decode(Int32.self, forKey: .pid)
-            startTime = try c.decode(UInt64.self, forKey: .startTime)
-            supervisedByLaunchd = try c.decodeIfPresent(Bool.self, forKey: .supervisedByLaunchd) ?? false
-            verified = try c.decodeIfPresent(Bool.self, forKey: .verified)
-        }
-    }
-
-    private func instanceRecordPath(_ profileID: String) -> String? {
-        config.map { $0.stateRoot + "/" + profileID + "/instance.json" }
+    /// 记录放在配置目录下：每个配置档的状态目录在它自己的沙箱里可写，放在那里的记录可以被受管程序伪造。
+    /// 以前写在状态目录里的 instance.json 不再读取。
+    private var instanceRecords: InstanceRecordStore? {
+        config.map { InstanceRecordStore(root: $0.configRoot, files: LocalFileStore()) }
     }
 
     private func recordInstance(profileID: String, instance: Int, revision: Int, root: ProcessKey) {
-        guard let path = instanceRecordPath(profileID),
-              let startTime = ProcessFacts.startTime(pid: root.pid) else { return }
+        guard let records = instanceRecords, let startTime = ProcessFacts.startTime(pid: root.pid) else { return }
         let snapshot = service?.instances(ofProfile: profileID).first { $0.id == instance }
-        let record = InstanceRecord(instance: instance, revision: revision, pid: root.pid, startTime: startTime,
-                                    supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false, verified: nil)
         processBirths[root] = startTime
-        try? JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path), options: .atomic)
-    }
-
-    private func recordVerification(instance: Int, passed: Bool) {
-        guard let config else { return }
-        for profileID in ((try? config.store.profileIDs()) ?? []) {
-            guard let path = instanceRecordPath(profileID),
-                  let data = FileManager.default.contents(atPath: path),
-                  var record = try? JSONDecoder().decode(InstanceRecord.self, from: data),
-                  record.instance == instance
-            else { continue }
-            record.verified = passed
-            try? JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path), options: .atomic)
-        }
+        try? records.save(InstanceRecord(instance: instance, profileID: profileID, revision: revision, pid: root.pid, startTime: startTime,
+                                         supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false))
     }
 
     func reconcileInstances() {
-        guard let config, let service else { return }
+        guard let config, let service, let records = instanceRecords else { return }
+        // 恢复出来的进程用的是“pid + 启动时刻”，和 ES 事件里的 version 对不上，
+        // 所以退出的判定也在这里做：进程真没了就把它从追踪表里摘掉。
         for profileID in ((try? config.store.profileIDs()) ?? []) {
-            guard let path = instanceRecordPath(profileID),
-                  let data = FileManager.default.contents(atPath: path),
-                  let record = try? JSONDecoder().decode(InstanceRecord.self, from: data)
-            else { continue }
-            // 进程没了、或者 pid 被复用（启动时刻对不上）就当作已退出，别把陌生进程算进来。
-            guard kill(record.pid, 0) == 0,
-                  ProcessFacts.startTime(pid: record.pid) == record.startTime
-            else { continue }
-            // 恢复出来的进程用的是“pid + 启动时刻”，和 ES 事件里的 version 对不上，
-            // 所以退出的判定也在这里做：进程真没了就把它从追踪表里摘掉。
             for instance in service.instances(ofProfile: profileID) {
                 for process in instance.liveProcesses where kill(process.pid, 0) != 0 {
                     service.ingest(.exit(process))
                 }
             }
-            if service.instances(ofProfile: profileID).contains(where: { $0.isRunning }) { continue }
-            service.restoreInstance(id: record.instance, profileID: profileID, revision: record.revision,
-                                    root: ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime)),
-                                    supervisedByLaunchd: record.supervisedByLaunchd, verified: record.verified)
-            processBirths[ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime))] = record.startTime
+        }
+        for record in ((try? records.all()) ?? []) {
+            // 进程没了、或者 pid 被复用（启动时刻对不上）就当作已退出，别把陌生进程算进来。
+            guard kill(record.pid, 0) == 0, ProcessFacts.startTime(pid: record.pid) == record.startTime else {
+                try? records.remove(profileID: record.profileID, instance: record.instance)
+                continue
+            }
+            // 每个实例一份记录，同一配置档的多个副本各自恢复；已在追踪表里的不重复装回。
+            if service.instances(ofProfile: record.profileID).contains(where: { $0.id == record.instance }) { continue }
+            let root = ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime))
+            service.restoreInstance(id: record.instance, profileID: record.profileID, revision: record.revision, root: root,
+                                    supervisedByLaunchd: record.supervisedByLaunchd)
+            processBirths[root] = record.startTime
         }
     }
 
@@ -304,6 +260,7 @@ final class HelperCore {
             // cleanup is reported in operationWarnings rather than blocking unrelated deletion.
             // Archived, not removed: it may hold the agent's working files. A recreated profile with
             // the same name must not see the old contents (or the old instance record).
+            try? instanceRecords?.removeAll(profileID: profileID)
             let state = config.stateRoot + "/" + profileID
             if FileManager.default.fileExists(atPath: state) {
                 let archive = config.stateRoot + "/.deleted/" + profileID + "-" + UUID().uuidString.lowercased()

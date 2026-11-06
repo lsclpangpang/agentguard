@@ -49,7 +49,7 @@ import Testing
         #expect(CompileError.nestedReadOnlyInsideReadWrite(inner: "/a", outer: "/").message
                 == "/a 是只读，但外层的 / 是读写，两条规则互相矛盾。要收回写权限，请先将外层目录改为只读或移除它的读写授权")
         #expect(CompileError.mutableExecutableWithoutHash("/opt/bin").message
-                == "/opt/bin 落在可写目录里，必须限定哈希才能执行")
+                == "/opt/bin 落在受管程序可写的目录里，程序可以替换它，所以不能直接放行执行。请改为放行不可写位置的程序")
     }
 
     @Test func everyCompileErrorHasAMessage() {

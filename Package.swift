@@ -17,8 +17,10 @@ let package = Package(
     targets: [
         // Platform-independent decisions; fully unit tested on Linux and macOS.
         .target(name: "GuardCore"),
+        // The one variadic SPI call (sandbox_check), which Swift cannot make itself.
+        .target(name: "CSandboxCheck"),
         // Thin macOS glue: sandbox, exec, XPC, code signing, Authorization Services.
-        .target(name: "GuardPlatform", dependencies: ["GuardCore"], swiftSettings: platformSettings),
+        .target(name: "GuardPlatform", dependencies: ["GuardCore", "CSandboxCheck"], swiftSettings: platformSettings),
         .executableTarget(name: "GuardCLI", dependencies: ["GuardCore", "GuardPlatform"], swiftSettings: platformSettings),
         .executableTarget(name: "GuardLauncher", dependencies: ["GuardCore", "GuardPlatform"], swiftSettings: platformSettings),
         .executableTarget(name: "GuardHelper", dependencies: ["GuardCore", "GuardPlatform"], swiftSettings: platformSettings),

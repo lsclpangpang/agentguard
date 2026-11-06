@@ -30,7 +30,11 @@ final class AppModel: ObservableObject {
     /// 待确认的变更。用窗口内的 SwiftUI sheet 呈现：NSAlert 的 sheet 在菜单栏 App 上会挂到
     /// 看不见的窗口上，用户点不动、也关不掉，整个界面看起来就是“只有滚轮活着”。
     @Published var confirmation: PendingConfirmation?
+    /// When the Helper last answered a status request. Older than `StatusFreshness.maxAge`, the
+    /// report on screen may no longer describe the running programs.
+    @Published var statusConfirmedAt: Date?
     private var pollTask: Task<Void, Never>?
+    private var autoRefreshTask: Task<Void, Never>?
     /// One registration repair per launch; see `repairStaleRegistrationIfNeeded`.
     private var didAttemptRegistrationRepair = false
     private var registrationRepairTask: Task<Void, Never>?
@@ -50,13 +54,15 @@ final class AppModel: ObservableObject {
         guard helperReachable, let report else { return OverallStatus(level: .problem, reasons: ["无法连接 Helper"]) }
         let objects = report.profiles.map { profile in
             ObjectStatus(profileID: profile.profileID,
-                         protection: ProtectionState.derive(mode: profile.mode, observeUntil: nil, revision: profile.revisionState, capabilityPassed: true),
+                         protection: ProtectionState.derive(mode: profile.mode, observeUntil: nil, revision: profile.revisionState),
                          revision: profile.revisionState, pendingItems: profile.pendingCount, unmanagedInstances: profile.unmanagedProcesses.count,
                          detachedInstances: profile.detachedInstances.count)
         }
         let health = CollectorHealth(problems: report.collectorProblems.isEmpty ? [] : [.interrupted])
-        return OverallStatus.evaluate(objects: objects, collector: health, capabilityCheckPassed: true)
+        return OverallStatus.evaluate(objects: objects, collector: health, freshness: freshness)
     }
+
+    var freshness: StatusFreshness { StatusFreshness.evaluate(confirmedAt: statusConfirmedAt, now: Date()) }
 
     func profile(_ id: String) -> Profile? {
         try? config.store.latest(id)
@@ -65,17 +71,32 @@ final class AppModel: ObservableObject {
     // MARK: Helper
 
     func refresh() {
+        startAutoRefresh()
         Task { _ = await refreshReport() }
     }
 
+    /// Running programs change on their own, so the status is asked for again every few seconds
+    /// rather than only after the user acts. Pending items are left to explicit refreshes.
+    private func startAutoRefresh() {
+        guard autoRefreshTask == nil else { return }
+        autoRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self else { return }
+                _ = await self.refreshReport(timeout: 10, includePending: false)
+            }
+        }
+    }
+
     /// Returns this request's snapshot, rather than the previous report cached by the UI.
-    private func refreshReport(timeout: TimeInterval = 60) async -> StatusReport? {
+    private func refreshReport(timeout: TimeInterval = 60, includePending: Bool = true) async -> StatusReport? {
         let status = await Task.detached {
             try? HelperClient().send(.status, timeout: timeout)
         }.value
         if case let .status(report) = status {
             self.report = report
             helperReachable = true
+            statusConfirmedAt = Date()
             installNotice = nil
         } else {
             // Preserve the last report during a failed query so the selected detail is not rebuilt.
@@ -84,6 +105,7 @@ final class AppModel: ObservableObject {
         }
         revision += 1
         guard case let .status(report) = status else { return nil }
+        guard includePending else { return report }
         // Pending-item retrieval must not delay a caller waiting for the actual status snapshot.
         Task.detached {
             for profile in report.profiles {
@@ -186,7 +208,8 @@ final class AppModel: ObservableObject {
     /// Proposes `profile` as the next revision, shows the exact diff, and asks for system
     /// authentication when the change widens permissions.
     /// `unchangedHint` replaces the bare "没有变化" when the caller knows why an edit may compile to the same policy.
-    func submit(_ profile: Profile, unchangedHint: String? = nil) {
+    /// `warnings` are shown above the change itself, e.g. access that legacy rules will keep granting.
+    func submit(_ profile: Profile, unchangedHint: String? = nil, warnings: [String] = []) {
         Task.detached {
             let logger = Logger(subsystem: "com.lsclpangpang.agentguard", category: "ui")
             do {
@@ -202,7 +225,7 @@ final class AppModel: ObservableObject {
                     await MainActor.run { self.lastError = unchangedHint ?? "没有变化" }
                     return
                 }
-                let confirmed = await self.askConfirmation("确认权限变更：\(profile.id)", info.summary)
+                let confirmed = await self.askConfirmation("确认权限变更：\(profile.id)", warnings + info.summary)
                 guard confirmed else { return }
                 var token: Data?
                 if info.requiresAuthorization {
@@ -222,11 +245,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func edit(_ id: String, unchangedHint: String? = nil, _ change: (inout Profile) -> Void) {
+    func edit(_ id: String, unchangedHint: String? = nil, warnings: [String] = [], _ change: (inout Profile) -> Void) {
         guard var profile = profile(id) else { return }
         change(&profile)
         profile.revision += 1
-        submit(profile, unchangedHint: unchangedHint)
+        submit(profile, unchangedHint: unchangedHint, warnings: warnings)
     }
 
     /// A newly added parent directory makes narrower child grants redundant. Normalize at the

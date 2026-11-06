@@ -29,7 +29,6 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case approveChange(changeID: String, digest: String, authorization: Data?)
     case applyTightening(profile: Profile)
     case registerInstance(profileID: String, revision: Int)
-    case reportVerification(instance: Int, passed: Bool)
     case installLaunchAgent(profileID: String)
     case pendingItems(profileID: String)
     case acknowledgeCollectorProblems
@@ -71,9 +70,12 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var unmanagedProcesses: [Int32]
     /// Nil means an older Helper has not reported the actual launch registration.
     public var launchAgent: LaunchAgentStatus?
+    /// Why the running instances did not pass the Helper's sandbox check; empty when they did or it has not run yet.
+    public var verificationIssues: [String]
 
     public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int,
-                detachedInstances: [Int] = [], unmanagedProcesses: [Int32] = [], launchAgent: LaunchAgentStatus? = nil) {
+                detachedInstances: [Int] = [], unmanagedProcesses: [Int32] = [], launchAgent: LaunchAgentStatus? = nil,
+                verificationIssues: [String] = []) {
         self.profileID = profileID
         self.savedRevision = savedRevision
         self.mode = mode
@@ -83,10 +85,12 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         self.detachedInstances = detachedInstances
         self.unmanagedProcesses = unmanagedProcesses
         self.launchAgent = launchAgent
+        self.verificationIssues = verificationIssues
     }
 
     enum CodingKeys: String, CodingKey {
         case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances, unmanagedProcesses, launchAgent
+        case verificationIssues
     }
 
     /// The app and the helper are updated separately; a report from an older helper has no `detachedInstances`.
@@ -101,6 +105,7 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         detachedInstances = try c.decodeIfPresent([Int].self, forKey: .detachedInstances) ?? []
         unmanagedProcesses = try c.decodeIfPresent([Int32].self, forKey: .unmanagedProcesses) ?? []
         launchAgent = try c.decodeIfPresent(LaunchAgentStatus.self, forKey: .launchAgent)
+        verificationIssues = try c.decodeIfPresent([String].self, forKey: .verificationIssues) ?? []
     }
 }
 
@@ -179,7 +184,13 @@ public final class HelperService {
     private var ledger: ApprovalLedger
     private var tracker = InstanceTracker()
     private var proposals: [String: (profile: Profile, info: PendingChangeInfo)] = [:]
+    /// Set only by the Helper's own sandbox check of the running process, never by the process.
     private var verified: [Int: Bool] = [:]
+    private var verificationIssues: [Int: [String]] = [:]
+    private var registeredAt: [Int: Date] = [:]
+    private let probe: (any SandboxProbe)?
+    /// How long a registered process may take to apply its sandbox before it counts as unprotected.
+    public static let sandboxGracePeriod: TimeInterval = 15
     private var nextInstance = 1
     private var observations: [String: [Observation]] = [:]
     private var collectorHealth = CollectorHealth(problems: [.notStarted])
@@ -193,8 +204,9 @@ public final class HelperService {
 
     public init(store: ProfileStore, environment: CompileEnvironment, catalog: TemplateCatalog, trust: CallerTrustPolicy,
                 verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String,
-                launcherGeneration: String = "", managedLogDirectory: String = "") {
+                launcherGeneration: String = "", managedLogDirectory: String = "", probe: (any SandboxProbe)? = nil) {
         self.store = store
+        self.probe = probe
         self.environment = environment
         self.compiler = PolicyCompiler(environment: environment)
         self.renderer = SBPLRenderer(environment: environment)
@@ -216,13 +228,54 @@ public final class HelperService {
         tracker.instances(ofProfile: profileID)
     }
 
-    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey,
-                                supervisedByLaunchd: Bool, verified: Bool?) {
+    /// The sandbox is checked again rather than restored: the process is still running, so the
+    /// check can simply be repeated, and nothing written earlier has to be trusted.
+    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool) {
         tracker.register(instance: id, profileID: profileID, revision: revision, root: root,
                          supervisedByLaunchd: supervisedByLaunchd, restored: true)
-        // 验收结论也要一起恢复：否则 Helper 重启后状态会退回“等待验收”，
-        // 而实例并没有重启、也没有人再上报一次。
-        if let verified { self.verified[id] = verified }
+        verified.removeValue(forKey: id)
+        verificationIssues.removeValue(forKey: id)
+        registeredAt.removeValue(forKey: id)
+        // Numbering restarts with the Helper; a new instance must never take a restored one's number.
+        nextInstance = max(nextInstance, id + 1)
+    }
+
+    /// Checks every running instance that has no verdict yet. Called on a timer and before each
+    /// status report, so a fresh start is confirmed as soon as its sandbox is in place.
+    public func verifyInstances() {
+        guard let probe, let ids = try? store.profileIDs() else { return }
+        let now = clock()
+        for profileID in ids {
+            for snapshot in tracker.instances(ofProfile: profileID) where snapshot.isRunning && verified[snapshot.id] == nil {
+                guard let profile = try? store.revision(profileID, snapshot.revision),
+                      let policy = try? compiler.compile(profile, catalog: catalog)
+                else {
+                    fail(snapshot.id, ["无法读取或编译这个实例使用的修订 \(snapshot.revision)"])
+                    continue
+                }
+                // Every process of an instance inherits the sandbox its root applied before exec.
+                guard let pid = (snapshot.entry ?? snapshot.liveProcesses.min())?.pid else { continue }
+                switch SandboxVerification.verify(pid: pid, expectations: SandboxVerification.expectations(for: policy, environment: environment),
+                                                  probe: probe) {
+                case .passed:
+                    verified[snapshot.id] = true
+                    verificationIssues.removeValue(forKey: snapshot.id)
+                case let .failed(issues):
+                    fail(snapshot.id, issues)
+                case .notSandboxed:
+                    // A restored instance has been running for a while; it gets no grace period.
+                    let deadline = registeredAt[snapshot.id].map { $0.addingTimeInterval(Self.sandboxGracePeriod) } ?? now
+                    if now >= deadline { fail(snapshot.id, ["进程没有进入沙箱，它不受这份权限限制"]) }
+                case .unavailable:
+                    break
+                }
+            }
+        }
+    }
+
+    private func fail(_ instance: Int, _ issues: [String]) {
+        verified[instance] = false
+        verificationIssues[instance] = issues
     }
 
     public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {
@@ -279,9 +332,7 @@ public final class HelperService {
     public func handle(_ request: HelperRequest, caller: CallerIdentity, process: ProcessKey) -> HelperResponse {
         var caller = caller
         caller.managedInstance = tracker.owner(of: process)
-        // 受管对象里的进程不能反过来操控权限；但“上报自己被装进了沙箱”正是启动器
-        // 该做的事——它注册完自己就已经是实例根进程，不豁免的话这条永远发不进来。
-        if caller.managedInstance != nil, !isSelfReport(request) { return .failure(code: "managed_caller") }
+        if caller.managedInstance != nil { return .failure(code: "managed_caller") }
         guard let role = trust.role(of: caller) else {
             let known = trust.identities
                 .map { "\($0.key)=\($0.value.cdhashes.sorted().joined(separator: "|"))" }
@@ -308,10 +359,6 @@ public final class HelperService {
             case let .registerInstance(profileID, revision):
                 try require(role, in: [.cli, .launcher])
                 return try register(profileID: profileID, revision: revision, process: process, supervisedByLaunchd: role == .launcher)
-            case let .reportVerification(instance, passed):
-                try require(role, in: [.app, .launcher])
-                verified[instance] = passed
-                return .ok
             case let .installLaunchAgent(profileID):
                 try require(role, in: [.app])
                 return try installLaunchAgent(profileID)
@@ -347,11 +394,6 @@ public final class HelperService {
         }
     }
 
-    private func isSelfReport(_ request: HelperRequest) -> Bool {
-        if case .reportVerification = request { return true }
-        return false
-    }
-
     private struct Failure: Error {
         let code: String
     }
@@ -371,7 +413,17 @@ public final class HelperService {
         return (current, base)
     }
 
+    /// Expiring grants stay closed until expiry is enforced, including for instances already running.
+    /// A grant that is already stored with an expiry may be kept, so such a profile stays editable.
+    private func rejectNewTemporaryGrants(_ profile: Profile) throws {
+        let stored = Set(try store.latest(profile.id)?.files ?? [])
+        if profile.files.contains(where: { $0.expiresAt != nil && !stored.contains($0) }) {
+            throw Failure(code: "temporary_grants_unavailable")
+        }
+    }
+
     private func propose(_ profile: Profile, caller: CallerIdentity) throws -> HelperResponse {
+        try rejectNewTemporaryGrants(profile)
         let (current, base) = try currentAndBase(profile)
         let diff = PolicyDiff(from: current, to: try compiler.compile(profile, catalog: catalog))
         let pending = try ledger.propose(profileID: profile.id, baseRevision: base, diff: diff, caller: caller, now: clock())
@@ -393,6 +445,7 @@ public final class HelperService {
     }
 
     private func tighten(_ profile: Profile, caller: CallerIdentity) throws -> HelperResponse {
+        try rejectNewTemporaryGrants(profile)
         let (current, base) = try currentAndBase(profile)
         let diff = PolicyDiff(from: current, to: try compiler.compile(profile, catalog: catalog))
         let approved = try ledger.applyTightening(profileID: profile.id, baseRevision: base, currentRevision: base, diff: diff, caller: caller)
@@ -407,6 +460,9 @@ public final class HelperService {
         let instance = nextInstance
         nextInstance += 1
         tracker.register(instance: instance, profileID: profileID, revision: revision, root: process, supervisedByLaunchd: supervisedByLaunchd)
+        verified.removeValue(forKey: instance)
+        verificationIssues.removeValue(forKey: instance)
+        registeredAt[instance] = clock()
         return .registered(instance: instance, sbpl: sbpl)
     }
 
@@ -434,7 +490,11 @@ public final class HelperService {
             catch { throw Failure(code: "startup_error:" + String(describing: error)) }
         } else { try archive() }
         // A recreated profile with the same name must start clean, not inherit old instances or findings.
-        for instance in tracker.removeInstances(ofProfile: profileID) { verified.removeValue(forKey: instance) }
+        for instance in tracker.removeInstances(ofProfile: profileID) {
+            verified.removeValue(forKey: instance)
+            verificationIssues.removeValue(forKey: instance)
+            registeredAt.removeValue(forKey: instance)
+        }
         observations.removeValue(forKey: profileID)
         proposals = proposals.filter { $0.value.profile.id != profileID }
         return .deleted(profileID: profileID, restoreOriginalLabel: restoreLabel)
@@ -478,6 +538,7 @@ public final class HelperService {
     }
 
     private func statusReport() throws -> StatusReport {
+        verifyInstances()
         var targets: [String: [String]] = [:]
         for id in try store.profileIDs() {
             if let latest = try store.latest(id), let policy = try? compiler.compile(latest, catalog: catalog) {
@@ -498,7 +559,8 @@ public final class HelperService {
                 // One profile that no longer compiles must not hide the status of all the others.
                 pendingCount: (try? pendingItems(for: latest).count) ?? 0,
                 detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id),
-                unmanagedProcesses: unmanaged[id]?.map(\.pid) ?? []
+                unmanagedProcesses: unmanaged[id]?.map(\.pid) ?? [],
+                verificationIssues: instances.filter(\.isRunning).flatMap { verificationIssues[$0.id] ?? [] }
             )
         }
         return StatusReport(profiles: profiles, collectorProblems: collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description))

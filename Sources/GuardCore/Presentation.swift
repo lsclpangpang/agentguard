@@ -16,6 +16,7 @@ public enum HelperFailure {
         case "no_launch_settings": return "配置档没有启动设置，不能接管启动项"
         case "invalid_profile": return "配置档名称无效"
         case "profile_running": return "配置档还有运行中的实例，请先停止它再删除"
+        case "temporary_grants_unavailable": return "临时授权暂未开放：到期后收回运行中程序的权限还没有完成"
         default: return "Helper 拒绝了请求（\(code)）"
         }
     }
@@ -53,7 +54,7 @@ extension CompileError {
         case let .conflictingHashes(path):
             return "\(path) 出现了两个不同的哈希"
         case let .mutableExecutableWithoutHash(path):
-            return "\(path) 落在可写目录里，必须限定哈希才能执行"
+            return "\(path) 落在受管程序可写的目录里，程序可以替换它，所以不能直接放行执行。请改为放行不可写位置的程序"
         case let .invalidLaunchLabel(label):
             return "启动项标签无效：\(label)"
         }

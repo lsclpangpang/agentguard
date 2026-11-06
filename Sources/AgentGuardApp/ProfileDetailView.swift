@@ -27,6 +27,7 @@ struct ProfileDetailView: View {
                     }
                     .padding(.bottom, 4)
 
+                    TrustNotices(profile: profile, status: model.status(for: profileID))
                     PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
                     ManagedProgramsCard(profile: profile, unmanaged: model.status(for: profileID)?.unmanagedProcesses ?? [])
                     FilesCard(profile: profile)
@@ -95,7 +96,7 @@ private struct ProfileHeader: View {
                 Text("正在启动…").font(.callout).foregroundStyle(.secondary)
             }
         } else if let status {
-            Chip(text: status.revisionState.displayText, tint: status.revisionState.tint)
+            Chip(text: model.revisionLabel(status).text, tint: model.revisionLabel(status).tint)
             Chip(text: "修订 \(status.savedRevision)")
             if !status.runningInstances.isEmpty {
                 Chip(text: "\(status.runningInstances.count) 个运行实例", systemImage: "bolt.fill", tint: .green)
@@ -105,6 +106,30 @@ private struct ProfileHeader: View {
             }
             if !status.unmanagedProcesses.isEmpty {
                 Chip(text: "\(status.unmanagedProcesses.count) 个未受管进程", systemImage: "exclamationmark.octagon.fill", tint: .red)
+            }
+        }
+    }
+}
+
+/// Reasons the status above cannot be taken at face value: a failed sandbox check of the running
+/// program, and legacy rules whose effect on the listed permissions nobody has verified.
+private struct TrustNotices: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+    let status: ProfileStatusReport?
+
+    var body: some View {
+        let legacy = model.legacyAnalysis(profile)
+        let issues = status?.verificationIssues ?? []
+        if !issues.isEmpty || legacy.hasUnverifiedFileRules {
+            VStack(alignment: .leading, spacing: 8) {
+                if !issues.isEmpty {
+                    Notice(kind: .error, text: "运行中的程序没有通过沙箱核对，下面的权限不代表它实际受到的限制：\n" + issues.joined(separator: "\n"))
+                }
+                if legacy.hasUnverifiedFileRules {
+                    Notice(kind: .warning, text: "存在 \(legacy.unverified.count) 条尚未核对的旧规则，它们可能放开下面没有列出的文件访问：\n"
+                        + legacy.unverified.joined(separator: "\n"))
+                }
             }
         }
     }
@@ -151,6 +176,13 @@ private struct PendingCard: View {
 }
 
 private struct FilesCard: View {
+    /// Legacy rules that keep a read-only grant (or part of it) writable: they are rendered after it.
+    private func legacyWriters(_ grant: FileGrant, _ legacy: LegacyRuleAnalysis) -> [String] {
+        guard grant.access == .readOnly,
+              let path = try? CanonicalPath(grant.path, resolver: model.config.environment.resolver) else { return [] }
+        return legacy.rulesAbove(path, access: .readWrite) + legacy.rulesWithin(path, access: .readWrite)
+    }
+
     @EnvironmentObject var model: AppModel
     let profile: Profile
 
@@ -169,11 +201,12 @@ private struct FilesCard: View {
             if profile.files.isEmpty {
                 Text("还没有手动添加的目录").font(.callout).foregroundStyle(.secondary).padding(.vertical, 4)
             } else {
+                let legacy = model.legacyAnalysis(profile)
                 VStack(spacing: 0) {
                     // 用条目本身做标识：按下标的话，插到中间会让它后面的每一行都被当成新行重建。
                     ForEach(Array(profile.files.enumerated()), id: \.element) { index, grant in
                         if index > 0 { Divider().padding(.leading, 46) }
-                        FileRow(grant: grant,
+                        FileRow(grant: grant, legacyWriters: legacyWriters(grant, legacy),
                                 remove: { model.removeFile(grant, from: profile.id) },
                                 setAccess: { model.setFileAccess(grant, to: $0, in: profile.id) })
                     }
@@ -187,6 +220,7 @@ private struct FilesCard: View {
 /// so a long path is truncated instead of being covered.
 private struct FileRow: View {
     let grant: FileGrant
+    let legacyWriters: [String]
     let remove: () -> Void
     let setAccess: (Access) -> Void
     @State private var hovering = false
@@ -200,6 +234,10 @@ private struct FileRow: View {
                 .layoutPriority(1)
             HStack(spacing: 6) {
                 if grant.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
+                if !legacyWriters.isEmpty {
+                    Chip(text: "旧规则仍可写入", systemImage: "exclamationmark.triangle.fill", tint: .orange)
+                        .help("以下旧规则在仅查看之后生效，仍允许写入：\n" + legacyWriters.joined(separator: "\n"))
+                }
                 // 直接在这里切换读写级别：授权项常常先按只读加进来，用起来才发现要写。
                 AccessControl(access: grant.access, change: setAccess)
             }
@@ -428,7 +466,6 @@ private struct ProgramsAndNetworkCard: View {
                                 Image(systemName: "play.square").foregroundStyle(.secondary)
                                 Text(PathLabel.abbreviate(grant.path)).font(.system(.callout, design: .monospaced))
                                     .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(grant.path)
-                                if grant.sha256 != nil { Chip(text: "限定哈希", systemImage: "number") }
                             }
                         }
                     }

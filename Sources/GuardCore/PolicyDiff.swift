@@ -160,11 +160,12 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .fileAccessChanged(path, from, to): return "~ \(path)：\(access(from)) → \(access(to))"
         case let .fileKindChanged(path, from, to): return "~ \(path)：\(kind(from)) → \(kind(to))"
         case let .fileSecretsFlagChanged(path, to): return "~ \(path)：" + (to ? "标记为凭证" : "取消凭证标记")
-        case let .execAdded(g): return "+ 可执行 \(g.path)" + (g.sha256 == nil ? "" : "（限定 SHA-256）")
+        // A recorded hash is not checked when the program runs, so it is never presented as a restriction.
+        case let .execAdded(g): return "+ 可执行 \(g.path)"
         case let .execRemoved(g): return "- 可执行 \(g.path)"
         case let .execHashChanged(path, from, to):
-            if to == nil { return "~ 可执行 \(path)：取消哈希限定" }
-            return from == nil ? "~ 可执行 \(path)：改为限定哈希" : "~ 可执行 \(path)：更换哈希"
+            if to == nil { return "~ 可执行 \(path)：删除记录的哈希（运行时不校验）" }
+            return from == nil ? "~ 可执行 \(path)：记录哈希（运行时不校验）" : "~ 可执行 \(path)：更换记录的哈希（运行时不校验）"
         case let .loopbackPortAdded(port): return "+ 本机 TCP 端口 \(port)"
         case let .loopbackPortRemoved(port): return "- 本机 TCP 端口 \(port)"
         case let .outboundTCPChanged(to): return "~ 对外 TCP 连接：\(toggle(to))"

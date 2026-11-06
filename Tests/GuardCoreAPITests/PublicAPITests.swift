@@ -11,10 +11,10 @@ import Testing
         ], collectorProblems: [])
         let objects = report.profiles.map { profile in
             ObjectStatus(profileID: profile.profileID,
-                         protection: ProtectionState.derive(mode: profile.mode, observeUntil: nil, revision: profile.revisionState, capabilityPassed: true),
+                         protection: ProtectionState.derive(mode: profile.mode, observeUntil: nil, revision: profile.revisionState),
                          revision: profile.revisionState, pendingItems: profile.pendingCount, unmanagedInstances: 0)
         }
-        let status = OverallStatus.evaluate(objects: objects, collector: CollectorHealth(problems: []), capabilityCheckPassed: true)
+        let status = OverallStatus.evaluate(objects: objects, collector: CollectorHealth(problems: []))
         #expect(status == .allGood)
         let unreachable = OverallStatus(level: .problem, reasons: ["无法连接 Helper"])
         #expect(unreachable.level == .problem)
@@ -25,7 +25,7 @@ import Testing
                                            runningInstances: [1], pendingCount: 0, detachedInstances: [1])
         let object = ObjectStatus(profileID: detached.profileID, protection: .enforced, revision: detached.revisionState, pendingItems: 0,
                                   unmanagedInstances: 0, detachedInstances: detached.detachedInstances.count)
-        #expect(OverallStatus.evaluate(objects: [object], collector: CollectorHealth(problems: []), capabilityCheckPassed: true).level == .attention)
+        #expect(OverallStatus.evaluate(objects: [object], collector: CollectorHealth(problems: [])).level == .attention)
 
         let unmanaged = ProfileStatusReport(profileID: "knodo", savedRevision: 2, mode: .enforce, revisionState: .applied(running: true),
                                             runningInstances: [], pendingCount: 0, unmanagedProcesses: [300])
