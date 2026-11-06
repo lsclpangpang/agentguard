@@ -178,6 +178,13 @@ import Testing
         }
     }
 
+    @Test func readOnlyPatternParentOfWritableDirectoryIsAllowed() throws {
+        _ = try F.compile(F.profile(files: [pattern("/Users/me/code/*"), F.rw("/Users/me/code/app")]))
+        #expect(throws: CompileError.nestedReadOnlyInsideReadWrite(inner: "/Users/me/code/**", outer: "/Users/me/code/app")) {
+            try F.compile(F.profile(files: [pattern("/Users/me/code/**"), F.rw("/Users/me/code/app")]))
+        }
+    }
+
     @Test func ruleReachingElsewhereIsNotDroppedWithThePath() throws {
         let rule = #"(allow file-write* (subpath "/Users/me/docs/a") (subpath "/Users/other"))"#
         let result = try LegacyRevocation.revoke("/Users/me/docs", keeping: .readOnly, from: [rule], resolver: resolver, caseInsensitive: true)

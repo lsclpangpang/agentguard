@@ -77,6 +77,22 @@ public struct PathPattern: Hashable, Sendable, CustomStringConvertible {
         return kind == .directory && mayCover(area, caseInsensitive: caseInsensitive)
     }
 
+    /// True when some match lies strictly below `area`: the pattern can consume all of `area` and
+    /// still has components left, each of which (`**` included) can match one more level.
+    public func mayMatchBelow(_ area: CanonicalPath, caseInsensitive: Bool) -> Bool {
+        Self.consumes(components[...], area.components[...], caseInsensitive: caseInsensitive)
+    }
+
+    private static func consumes(_ pattern: ArraySlice<String>, _ path: ArraySlice<String>, caseInsensitive: Bool) -> Bool {
+        guard let head = pattern.first else { return false }
+        if path.isEmpty { return true }
+        if head == "**" {
+            return consumes(pattern.dropFirst(), path, caseInsensitive: caseInsensitive)
+                || consumes(pattern, path.dropFirst(), caseInsensitive: caseInsensitive)
+        }
+        return glob(head, path.first!, caseInsensitive: caseInsensitive) && consumes(pattern.dropFirst(), path.dropFirst(), caseInsensitive: caseInsensitive)
+    }
+
     /// True when a directory-kind grant would cover `area` because some match is `area` or above it.
     public func mayCover(_ area: CanonicalPath, caseInsensitive: Bool) -> Bool {
         (0...area.components.count).contains { length in

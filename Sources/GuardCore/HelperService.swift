@@ -250,6 +250,13 @@ public final class HelperService {
         guard let probe, let ids = try? store.profileIDs() else { return }
         let now = clock()
         for profileID in ids {
+            // An exited instance's verdict is never read again (revision state looks only at running ones).
+            for snapshot in tracker.instances(ofProfile: profileID) where !snapshot.isRunning {
+                verified.removeValue(forKey: snapshot.id)
+                verificationIssues.removeValue(forKey: snapshot.id)
+                registeredAt.removeValue(forKey: snapshot.id)
+                expectations.removeValue(forKey: snapshot.id)
+            }
             for snapshot in tracker.instances(ofProfile: profileID) where snapshot.isRunning && verified[snapshot.id] == nil {
                 // A restored instance's rules were handed out by an earlier Helper; recompiling its revision is the best evidence left.
                 if expectations[snapshot.id] == nil, let profile = try? store.revision(profileID, snapshot.revision),

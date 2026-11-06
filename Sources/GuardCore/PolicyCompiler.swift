@@ -343,11 +343,12 @@ public struct PolicyCompiler: Sendable {
                 throw CompileError.overlapsProtectedPath(grant: grant.pattern.value, protected: area.value)
             }
             guard !environment.allowsNestedReadOnly else { continue }
-            // A read-only pattern that shares any path with a writable directory only looks like a restriction.
+            // A read-only pattern matching anything inside a writable directory only looks like a restriction.
+            // Matching the writable directory itself, or above it, is the read-only parent of a writable child.
             if grant.access == .readOnly, let outer = files.first(where: {
                 $0.access == .readWrite && $0.kind == .directory
                     && ($0.path.contains(grant.pattern.base, caseInsensitive: caseInsensitive)
-                        || grant.pattern.mayReachInside($0.path, kind: grant.kind, caseInsensitive: caseInsensitive))
+                        || grant.pattern.mayMatchBelow($0.path, caseInsensitive: caseInsensitive))
             }) {
                 throw CompileError.nestedReadOnlyInsideReadWrite(inner: grant.pattern.value, outer: outer.path.value)
             }
