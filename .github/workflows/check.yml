@@ -1,0 +1,28 @@
+name: Check
+
+# Builds and tests every pull request on macOS, so code under `#if os(macOS)` is compiled before review.
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Build AgentGuard.app
+        run: ./scripts/build-app.sh
