@@ -326,13 +326,17 @@ final class HelperCore {
         let controller = launchController(config: config, owner: owner)
         for target in targets {
             let plan = validatedTargets(target.profileID)
+            var stopped = false
             do {
                 operationWarnings += try controller.remove(profileID: target.profileID, restoreOriginal: target.restoreOriginalLabel,
-                                                           hasLaunchSettings: target.hasLaunchSettings) { self.stop(plan, profileID: target.profileID) }
+                                                           hasLaunchSettings: target.hasLaunchSettings) {
+                    self.stop(plan, profileID: target.profileID)
+                    stopped = true
+                }
             } catch {
                 operationWarnings.append("\(target.profileID)：未能移除启动项（\(error)），请在重新安装后处理")
                 // The programs are stopped anyway: nothing would manage them once the Helper is gone.
-                stop(plan, profileID: target.profileID)
+                if !stopped { stop(plan, profileID: target.profileID) }
             }
         }
         if restoreDisabled {

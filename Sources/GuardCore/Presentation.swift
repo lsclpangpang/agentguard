@@ -125,9 +125,11 @@ public struct ProgramStatusSummary: Equatable, Sendable {
                                         next: .checkAndRecover, level: .attention)
         }
         // Unprotected observation runs under `(allow default)`: verification passing says nothing about limits.
-        if status.mode.liftsBoundary && !status.runningInstances.isEmpty {
-            return ProgramStatusSummary(headline: "运行中 · 没有保护", impact: "\(programName) 处于无保护观察模式，只记录不限制，下面的权限现在不起作用。",
-                                        next: .restart, level: .problem)
+        if status.mode.liftsBoundary {
+            let running = !status.runningInstances.isEmpty
+            return ProgramStatusSummary(headline: running ? "运行中 · 没有保护" : "未运行 · 没有保护",
+                                        impact: "\(programName) 处于无保护观察模式，只记录不限制，下面的权限\(running ? "现在" : "启动后也")不起作用。",
+                                        next: nil, level: .problem)
         }
         var summary: ProgramStatusSummary
         switch status.revisionState {

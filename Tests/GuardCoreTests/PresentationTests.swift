@@ -87,6 +87,10 @@ import Testing
         report.mode = .unprotectedObserve
         let s = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
         #expect(s.level == .problem && s.headline == "运行中 · 没有保护")
+        var stopped = status(.applied(running: false))
+        stopped.mode = .unprotectedObserve
+        stopped.runningInstances = []
+        #expect(ProgramStatusSummary.evaluate(stopped, freshness: .current, programName: "Knodo", hasLaunch: true).level == .problem)
     }
 
     @Test func staleIsNeverGreen() {
