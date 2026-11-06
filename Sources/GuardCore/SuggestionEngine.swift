@@ -1,3 +1,5 @@
+import Foundation
+
 public enum ObservedAccess: Hashable, Sendable, Codable {
     case read(String)
     case write(String)
@@ -7,17 +9,20 @@ public enum ObservedAccess: Hashable, Sendable, Codable {
     case listen(Int)
 }
 
-public struct Observation: Hashable, Sendable {
+public struct Observation: Hashable, Sendable, Codable {
     public var instance: Int?
     public var access: ObservedAccess
+    /// True only when the sandbox reported refusing it; an access seen by the collector succeeded.
     public var denied: Bool
     public var count: Int
+    public var at: Date?
 
-    public init(instance: Int?, access: ObservedAccess, denied: Bool, count: Int = 1) {
+    public init(instance: Int?, access: ObservedAccess, denied: Bool, count: Int = 1, at: Date? = nil) {
         self.instance = instance
         self.access = access
         self.denied = denied
         self.count = count
+        self.at = at
     }
 }
 
@@ -32,15 +37,75 @@ public enum Suggestion: Hashable, Sendable, Codable {
 
 public struct PendingItem: Hashable, Sendable, Codable {
     public var suggestion: Suggestion
+    /// Judged on everything accepting the suggestion would grant, not on the accesses that led to it.
     public var sensitive: Bool
     public var evidence: Int
     public var samples: [String]
+    /// How many of the `evidence` accesses the sandbox reported refusing. Zero means none is known
+    /// to have been blocked: they were observed succeeding, so the item is only a suggestion.
+    public var denied: Int
+    public var firstSeen: Date?
+    public var lastSeen: Date?
 
-    public init(suggestion: Suggestion, sensitive: Bool, evidence: Int, samples: [String]) {
+    public init(suggestion: Suggestion, sensitive: Bool, evidence: Int, samples: [String], denied: Int = 0, firstSeen: Date? = nil, lastSeen: Date? = nil) {
         self.suggestion = suggestion
         self.sensitive = sensitive
         self.evidence = evidence
         self.samples = samples
+        self.denied = denied
+        self.firstSeen = firstSeen
+        self.lastSeen = lastSeen
+    }
+
+    /// Blocked accesses are evidence of a refusal; the rest is a suggestion.
+    public var wasBlocked: Bool { denied > 0 }
+
+    enum CodingKeys: String, CodingKey {
+        case suggestion, sensitive, evidence, samples, denied, firstSeen, lastSeen
+    }
+
+    /// An older Helper reports no denial counts; its items were all treated as blocked before.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        suggestion = try c.decode(Suggestion.self, forKey: .suggestion)
+        sensitive = try c.decode(Bool.self, forKey: .sensitive)
+        evidence = try c.decode(Int.self, forKey: .evidence)
+        samples = try c.decode([String].self, forKey: .samples)
+        denied = try c.decodeIfPresent(Int.self, forKey: .denied) ?? 0
+        firstSeen = try c.decodeIfPresent(Date.self, forKey: .firstSeen)
+        lastSeen = try c.decodeIfPresent(Date.self, forKey: .lastSeen)
+    }
+}
+
+/// Counts of one kind of access: how often, how often refused, and when.
+struct Tally {
+    var count = 0
+    var denied = 0
+    var first: Date?
+    var last: Date?
+    var samples: Set<String> = []
+
+    mutating func add(_ observation: Observation, sample: String? = nil) {
+        count += observation.count
+        if observation.denied { denied += observation.count }
+        if let at = observation.at {
+            first = min(first ?? at, at)
+            last = max(last ?? at, at)
+        }
+        if let sample { samples.insert(sample) }
+    }
+
+    mutating func merge(_ other: Tally) {
+        count += other.count
+        denied += other.denied
+        if let at = other.first { first = min(first ?? at, at) }
+        if let at = other.last { last = max(last ?? at, at) }
+        samples.formUnion(other.samples)
+    }
+
+    func item(_ suggestion: Suggestion, sensitive: Bool, samples: [String]? = nil) -> PendingItem {
+        PendingItem(suggestion: suggestion, sensitive: sensitive, evidence: count, samples: samples ?? Array(self.samples.sorted().prefix(3)),
+                    denied: denied, firstSeen: first, lastSeen: last)
     }
 }
 
@@ -75,11 +140,11 @@ public struct SuggestionEngine: Sendable {
         let folded = foldedPrefixes.compactMap { try? CanonicalPath($0, resolver: identity) }
         let candidates = templates.filter { !enabledTemplates.contains($0.id) }.sorted { $0.id < $1.id }
 
-        var templateEvidence: [String: (count: Int, samples: Set<String>)] = [:]
-        var files: [String: (path: CanonicalPath, write: Bool, count: Int)] = [:]
-        var execs: [String: Int] = [:]
-        var ports: [Int: Int] = [:]
-        var outbound = 0, listen = 0
+        var templateEvidence: [String: Tally] = [:]
+        var files: [String: (path: CanonicalPath, write: Bool, tally: Tally)] = [:]
+        var execs: [String: Tally] = [:]
+        var ports: [Int: Tally] = [:]
+        var outbound = Tally(), listen = Tally()
 
         for observation in observations {
             switch observation.access {
@@ -94,45 +159,51 @@ public struct SuggestionEngine: Sendable {
                         : entry.pattern.matches(path, caseInsensitive: caseInsensitive))
                 }) { continue }
                 if let template = candidates.first(where: { covers(grants(of: $0), path, write: write) }) {
-                    templateEvidence[template.id, default: (0, [])].count += observation.count
-                    templateEvidence[template.id]?.samples.insert(path.value)
+                    templateEvidence[template.id, default: Tally()].add(observation, sample: path.value)
                     continue
                 }
-                var entry = files[path.value] ?? (path, false, 0)
+                var entry = files[path.value] ?? (path, false, Tally())
                 entry.write = entry.write || write
-                entry.count += observation.count
+                entry.tally.add(observation)
                 files[path.value] = entry
             case let .exec(raw):
                 guard let path = try? CanonicalPath(raw, resolver: resolver) else { continue }
                 if policy.unrestrictedExec || grantedExec.contains(path.value) { continue }
                 if let template = candidates.first(where: { t in t.exec.contains { (try? CanonicalPath($0.path, resolver: resolver))?.value == path.value } }) {
-                    templateEvidence[template.id, default: (0, [])].count += observation.count
-                    templateEvidence[template.id]?.samples.insert(path.value)
+                    templateEvidence[template.id, default: Tally()].add(observation, sample: path.value)
                     continue
                 }
-                execs[path.value, default: 0] += observation.count
+                execs[path.value, default: Tally()].add(observation)
             case let .connectLoopback(port):
-                if !policy.network.loopbackTCPConnect.contains(port) { ports[port, default: 0] += observation.count }
+                if !policy.network.loopbackTCPConnect.contains(port) { ports[port, default: Tally()].add(observation) }
             case .connectRemote:
-                if policy.network.outboundTCP != .allowed { outbound += observation.count }
+                if policy.network.outboundTCP != .allowed { outbound.add(observation) }
             case .listen:
-                if policy.network.listen != .allowed { listen += observation.count }
+                if policy.network.listen != .allowed { listen.add(observation) }
             }
         }
 
         let sensitive = SensitivePaths(home: home)
-        var items: [PendingItem] = templateEvidence.map { id, value in
-            PendingItem(suggestion: .template(id: id), sensitive: value.samples.contains(where: sensitive.isSensitive), evidence: value.count, samples: Array(value.samples.sorted().prefix(3)))
+        let byID = Dictionary(templates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var items: [PendingItem] = templateEvidence.map { id, tally in
+            // Enabling a template grants all of it, so its sensitivity is that of every grant it holds.
+            tally.item(.template(id: id), sensitive: byID[id].map { templateIsSensitive($0, sensitive) } ?? true)
         }
         items += aggregate(files, sensitive: sensitive)
-        items += execs.map { PendingItem(suggestion: .exec($0.key), sensitive: sensitive.isSensitive($0.key), evidence: $0.value, samples: [$0.key]) }
-        items += ports.map { PendingItem(suggestion: .loopbackPort($0.key), sensitive: false, evidence: $0.value, samples: []) }
-        if outbound > 0 { items.append(PendingItem(suggestion: .outboundTCP, sensitive: false, evidence: outbound, samples: [])) }
-        if listen > 0 { items.append(PendingItem(suggestion: .listen, sensitive: false, evidence: listen, samples: [])) }
+        items += execs.map { $0.value.item(.exec($0.key), sensitive: sensitive.isSensitive($0.key), samples: [$0.key]) }
+        items += ports.map { $0.value.item(.loopbackPort($0.key), sensitive: false, samples: []) }
+        if outbound.count > 0 { items.append(outbound.item(.outboundTCP, sensitive: false, samples: [])) }
+        if listen.count > 0 { items.append(listen.item(.listen, sensitive: false, samples: [])) }
         return items.sorted(by: Self.order)
     }
 
-    private func aggregate(_ files: [String: (path: CanonicalPath, write: Bool, count: Int)], sensitive: SensitivePaths) -> [PendingItem] {
+    private func templateIsSensitive(_ template: Template, _ sensitive: SensitivePaths) -> Bool {
+        template.files.contains { grant in
+            grant.readsSecrets || (grant.kind == .directory ? sensitive.overlapsSensitive(grant.path) : sensitive.isSensitive(grant.path))
+        }
+    }
+
+    private func aggregate(_ files: [String: (path: CanonicalPath, write: Bool, tally: Tally)], sensitive: SensitivePaths) -> [PendingItem] {
         let groups = Dictionary(grouping: files.values) { entry in "/" + entry.path.components.dropLast().joined(separator: "/") }
         return groups.flatMap { parent, entries -> [PendingItem] in
             let paths = entries.map(\.path.value).sorted()
@@ -140,12 +211,14 @@ public struct SuggestionEngine: Sendable {
             // 逐条建议既没法批准、批准了也立刻过期，所以一律按目录聚合，不受阈值限制。
             if entries.count >= aggregationThreshold || isUnderTemporaryRoot(parent) {
                 let access: Access = entries.contains(where: \.write) ? .readWrite : .readOnly
-                return [PendingItem(suggestion: .file(path: parent, kind: .directory, access: access), sensitive: sensitive.overlapsSensitive(parent),
-                                    evidence: entries.reduce(0) { $0 + $1.count }, samples: Array(paths.prefix(3)))]
+                var total = Tally()
+                for entry in entries { total.merge(entry.tally) }
+                return [total.item(.file(path: parent, kind: .directory, access: access), sensitive: sensitive.overlapsSensitive(parent),
+                                   samples: Array(paths.prefix(3)))]
             }
             return entries.map { entry in
-                PendingItem(suggestion: .file(path: entry.path.value, kind: .file, access: entry.write ? .readWrite : .readOnly),
-                            sensitive: sensitive.isSensitive(entry.path.value), evidence: entry.count, samples: [entry.path.value])
+                entry.tally.item(.file(path: entry.path.value, kind: .file, access: entry.write ? .readWrite : .readOnly),
+                                 sensitive: sensitive.isSensitive(entry.path.value), samples: [entry.path.value])
             }
         }
     }

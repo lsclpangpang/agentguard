@@ -37,6 +37,24 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case restartManagedInstance(profileID: String)
     /// `restoreOriginal` puts back the launch item a takeover replaced; it then runs unprotected.
     case deleteProfile(profileID: String, restoreOriginal: Bool, authorization: Data?)
+    /// Stops the managed copies for this login only; the login setting is left as it is.
+    case stopManaged(profileID: String)
+    /// Puts the managed launch item where the saved login setting says, without stopping anything.
+    case applyLoginSetting(profileID: String)
+    /// Backs up and unloads another launch item that starts the same program outside AgentGuard.
+    case disableLaunchItem(profileID: String, label: String, path: String, authorization: Data?)
+    /// Puts back a launch item disabled earlier; it then runs outside AgentGuard again.
+    case restoreLaunchItem(label: String, authorization: Data?)
+    case decide(profileID: String, suggestion: Suggestion, decision: SuggestionDecision)
+    case activity(profileID: String)
+    /// Stops every managed program and removes AgentGuard's launch items and collector. Profiles,
+    /// backups and the programs' working data are kept.
+    case uninstall(restoreOriginals: Bool, authorization: Data?)
+}
+
+/// Bumped whenever the App and the Helper must be updated together; the App compares it with its own.
+public enum HelperProtocol {
+    public static let version = 2
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -72,10 +90,12 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var launchAgent: LaunchAgentStatus?
     /// Why the running instances did not pass the Helper's sandbox check; empty when they did or it has not run yet.
     public var verificationIssues: [String]
+    /// Running instances whose process tree is not fully known; see `InstanceSnapshot.trackingIncomplete`.
+    public var untrackedInstances: [Int]
 
     public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int,
                 detachedInstances: [Int] = [], unmanagedProcesses: [Int32] = [], launchAgent: LaunchAgentStatus? = nil,
-                verificationIssues: [String] = []) {
+                verificationIssues: [String] = [], untrackedInstances: [Int] = []) {
         self.profileID = profileID
         self.savedRevision = savedRevision
         self.mode = mode
@@ -86,11 +106,12 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         self.unmanagedProcesses = unmanagedProcesses
         self.launchAgent = launchAgent
         self.verificationIssues = verificationIssues
+        self.untrackedInstances = untrackedInstances
     }
 
     enum CodingKeys: String, CodingKey {
         case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances, unmanagedProcesses, launchAgent
-        case verificationIssues
+        case verificationIssues, untrackedInstances
     }
 
     /// The app and the helper are updated separately; a report from an older helper has no `detachedInstances`.
@@ -106,6 +127,7 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         unmanagedProcesses = try c.decodeIfPresent([Int32].self, forKey: .unmanagedProcesses) ?? []
         launchAgent = try c.decodeIfPresent(LaunchAgentStatus.self, forKey: .launchAgent)
         verificationIssues = try c.decodeIfPresent([String].self, forKey: .verificationIssues) ?? []
+        untrackedInstances = try c.decodeIfPresent([Int].self, forKey: .untrackedInstances) ?? []
     }
 }
 
@@ -113,10 +135,35 @@ public struct StatusReport: Codable, Equatable, Sendable {
     public var profiles: [ProfileStatusReport]
     /// Empty only while the collector is healthy; an empty list never means "nothing happened".
     public var collectorProblems: [String]
+    /// `HelperProtocol.version` of the Helper that answered; 0 for one that predates it.
+    public var helperProtocol: Int
 
-    public init(profiles: [ProfileStatusReport], collectorProblems: [String]) {
+    public init(profiles: [ProfileStatusReport], collectorProblems: [String], helperProtocol: Int = HelperProtocol.version) {
         self.profiles = profiles
         self.collectorProblems = collectorProblems
+        self.helperProtocol = helperProtocol
+    }
+
+    enum CodingKeys: String, CodingKey { case profiles, collectorProblems, helperProtocol }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        profiles = try c.decode([ProfileStatusReport].self, forKey: .profiles)
+        collectorProblems = try c.decode([String].self, forKey: .collectorProblems)
+        helperProtocol = try c.decodeIfPresent(Int.self, forKey: .helperProtocol) ?? 0
+    }
+}
+
+/// One profile an uninstall removes: its launch items, and the original item to put back if asked.
+public struct UninstallTarget: Codable, Equatable, Sendable {
+    public var profileID: String
+    public var hasLaunchSettings: Bool
+    public var restoreOriginalLabel: String?
+
+    public init(profileID: String, hasLaunchSettings: Bool, restoreOriginalLabel: String?) {
+        self.profileID = profileID
+        self.hasLaunchSettings = hasLaunchSettings
+        self.restoreOriginalLabel = restoreOriginalLabel
     }
 }
 
@@ -139,6 +186,16 @@ public enum HelperResponse: Codable, Equatable, Sendable {
     /// The action completed; some optional cleanup or direct process termination was skipped.
     case completed(warnings: [String])
     case failure(code: String)
+    /// The action completed; says what was stopped and what could not be confirmed.
+    case report(OperationReport)
+    /// The platform layer unloads the profile's managed jobs and stops its processes, keeping the files.
+    case stopManaged(profileID: String)
+    /// The platform layer moves the managed launch item to match the saved login setting.
+    case relocateLaunchAgent(profileID: String, runAtLogin: Bool)
+    case disableLaunchItem(label: String, path: String)
+    case restoreLaunchItem(label: String)
+    case activity(ActivityLog)
+    case uninstall(targets: [UninstallTarget])
 }
 
 public enum HelperWire {
@@ -192,6 +249,7 @@ public final class HelperService {
     /// that changes templates must not change what an already running process is checked against.
     private var expectations: [Int: [SandboxExpectation]] = [:]
     private let probe: (any SandboxProbe)?
+    private let activity: ActivityStore?
     /// How long a registered process may take to apply its sandbox before it counts as unprotected.
     public static let sandboxGracePeriod: TimeInterval = 15
     private var nextInstance = 1
@@ -207,9 +265,11 @@ public final class HelperService {
 
     public init(store: ProfileStore, environment: CompileEnvironment, catalog: TemplateCatalog, trust: CallerTrustPolicy,
                 verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String,
-                launcherGeneration: String = "", managedLogDirectory: String = "", probe: (any SandboxProbe)? = nil) {
+                launcherGeneration: String = "", managedLogDirectory: String = "", probe: (any SandboxProbe)? = nil,
+                activity: ActivityStore? = nil) {
         self.store = store
         self.probe = probe
+        self.activity = activity
         self.environment = environment
         self.compiler = PolicyCompiler(environment: environment)
         self.renderer = SBPLRenderer(environment: environment)
@@ -252,6 +312,9 @@ public final class HelperService {
         for profileID in ids {
             // An exited instance's verdict is never read again (revision state looks only at running ones).
             for snapshot in tracker.instances(ofProfile: profileID) where !snapshot.isRunning {
+                if registeredAt[snapshot.id] != nil || verified[snapshot.id] != nil || expectations[snapshot.id] != nil {
+                    log(profileID, .stopped, "运行副本 #\(snapshot.id) 已退出")
+                }
                 verified.removeValue(forKey: snapshot.id)
                 verificationIssues.removeValue(forKey: snapshot.id)
                 registeredAt.removeValue(forKey: snapshot.id)
@@ -273,17 +336,26 @@ public final class HelperService {
                 case .passed:
                     verified[snapshot.id] = true
                     verificationIssues.removeValue(forKey: snapshot.id)
+                    log(profileID, .verified, "运行副本 #\(snapshot.id) 的保护已确认", ["使用修订 \(snapshot.revision) 的权限"])
                 case let .failed(issues):
                     fail(snapshot.id, issues)
+                    log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有通过保护确认", issues)
                 case .notSandboxed:
                     // A restored instance has been running for a while; it gets no grace period.
                     let deadline = registeredAt[snapshot.id].map { $0.addingTimeInterval(Self.sandboxGracePeriod) } ?? now
-                    if now >= deadline { fail(snapshot.id, ["进程没有进入沙箱，它不受这份权限限制"]) }
+                    if now >= deadline {
+                        fail(snapshot.id, ["进程没有进入沙箱，它不受这份权限限制"])
+                        log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有进入沙箱")
+                    }
                 case .unavailable:
                     break
                 }
             }
         }
+    }
+
+    private func log(_ profileID: String, _ kind: HistoryKind, _ title: String, _ details: [String] = []) {
+        try? activity?.append(HistoryEntry(at: clock(), kind: kind, title: title, details: details), profileID: profileID)
     }
 
     private func fail(_ instance: Int, _ issues: [String]) {
@@ -297,6 +369,11 @@ public final class HelperService {
 
     public func ingest(_ event: ProcessEvent) {
         tracker.handle(event)
+    }
+
+    /// See `InstanceTracker.adoptDescendants`; returns the birth time of each process taken in.
+    public func adoptDescendants(of processes: [RunningProcess], birth: (Int32) -> UInt64?) -> [ProcessKey: UInt64] {
+        tracker.adoptDescendants(of: processes, birth: birth)
     }
 
     public func managedInstance(of process: ProcessKey) -> Int? {
@@ -317,13 +394,13 @@ public final class HelperService {
         let instance = tracker.owner(of: line.process)
         if let event = line.processEvent { tracker.handle(event) }
         guard let instance else { return }
-        for access in line.observedAccesses { record(Observation(instance: instance, access: access, denied: false), instance: instance) }
+        for access in line.observedAccesses { record(Observation(instance: instance, access: access, denied: false, at: clock()), instance: instance) }
     }
 
     /// One sandbox denial from the unified log; only denials of managed processes are kept.
     public func observe(denial: SandboxDenial) {
         guard let access = denial.access, let instance = tracker.owner(ofPID: denial.pid) else { return }
-        record(Observation(instance: instance, access: access, denied: true), instance: instance)
+        record(Observation(instance: instance, access: access, denied: true, at: clock()), instance: instance)
     }
 
     private func record(_ observation: Observation, instance: Int) {
@@ -334,7 +411,13 @@ public final class HelperService {
         observations[profileID] = list
     }
 
+    /// Items still waiting for an answer: decided ones are listed in the activity log instead.
     private func pendingItems(for profile: Profile) throws -> [PendingItem] {
+        let decided = activity?.activeDecisions(profile.id) ?? [:]
+        return try allPendingItems(for: profile).filter { decided[$0.suggestion] == nil }
+    }
+
+    private func allPendingItems(for profile: Profile) throws -> [PendingItem] {
         let engine = SuggestionEngine(home: environment.homeDirectory, aggregationThreshold: 20,
                                       templates: catalog.templates.values.sorted { $0.id < $1.id },
                                       resolver: environment.resolver, caseInsensitive: environment.caseInsensitive)
@@ -392,6 +475,40 @@ public final class HelperService {
             case let .deleteProfile(profileID, restoreOriginal, authorization):
                 try require(role, in: [.app])
                 return try deleteProfile(profileID, restoreOriginal: restoreOriginal, token: authorization)
+            case let .stopManaged(profileID):
+                try require(role, in: [.app])
+                guard try store.latest(profileID) != nil else { throw Failure(code: "unknown_profile") }
+                log(profileID, .stopped, "停止本次运行")
+                return .stopManaged(profileID: profileID)
+            case let .applyLoginSetting(profileID):
+                try require(role, in: [.app])
+                guard let launch = try store.latest(profileID)?.launch else { throw Failure(code: "no_launch_settings") }
+                return .relocateLaunchAgent(profileID: profileID, runAtLogin: launch.runAtLogin)
+            case let .disableLaunchItem(profileID, label, path, authorization):
+                try require(role, in: [.app])
+                guard try store.latest(profileID) != nil else { throw Failure(code: "unknown_profile") }
+                guard PolicyCompiler.isSafeLaunchLabel(label) else { throw Failure(code: "invalid_launch_item") }
+                guard verifier.verify(token: authorization, scope: Self.authorizationScope(forDisabling: label), summary: ["停用启动项 \(label)"]) else {
+                    throw ApprovalError.authorizationMissing
+                }
+                log(profileID, .decision, "停用其他启动入口 \(label)", [path])
+                return .disableLaunchItem(label: label, path: path)
+            case let .restoreLaunchItem(label, authorization):
+                try require(role, in: [.app])
+                guard PolicyCompiler.isSafeLaunchLabel(label) else { throw Failure(code: "invalid_launch_item") }
+                guard verifier.verify(token: authorization, scope: Self.authorizationScope(forRestoring: label), summary: ["恢复启动项 \(label)（将无限制运行）"]) else {
+                    throw ApprovalError.authorizationMissing
+                }
+                return .restoreLaunchItem(label: label)
+            case let .decide(profileID, suggestion, decision):
+                try require(role, in: [.app])
+                return try decide(profileID, suggestion: suggestion, decision: decision)
+            case let .activity(profileID):
+                try require(role, in: [.app])
+                return .activity(try activityLog(profileID))
+            case let .uninstall(restoreOriginals, authorization):
+                try require(role, in: [.app])
+                return try uninstall(restoreOriginals: restoreOriginals, token: authorization)
             }
         } catch let failure as Failure {
             return .failure(code: failure.code)
@@ -454,6 +571,7 @@ public final class HelperService {
         let approved = try ledger.approve(changeID: changeID, presentedDigest: digest, currentRevision: current,
                                           caller: caller, authorization: evidence, now: clock())
         try store.save(proposal.profile, approval: approved)
+        log(proposal.profile.id, .permissionChange, "权限已保存为修订 \(approved.newRevision)", proposal.info.summary)
         return .applied(revision: approved.newRevision)
     }
 
@@ -463,6 +581,7 @@ public final class HelperService {
         let diff = PolicyDiff(from: current, to: try compiler.compile(profile, catalog: catalog))
         let approved = try ledger.applyTightening(profileID: profile.id, baseRevision: base, currentRevision: base, diff: diff, caller: caller)
         try store.save(profile, approval: approved)
+        if !diff.changes.isEmpty { log(profile.id, .permissionChange, "权限已收紧为修订 \(approved.newRevision)", diff.summaryLines) }
         return .applied(revision: approved.newRevision)
     }
 
@@ -478,10 +597,14 @@ public final class HelperService {
         verificationIssues.removeValue(forKey: instance)
         registeredAt[instance] = clock()
         expectations[instance] = SandboxVerification.expectations(for: policy, environment: environment)
+        log(profileID, .started, "运行副本 #\(instance) 已启动", ["使用修订 \(revision) 的权限", supervisedByLaunchd ? "由 AgentGuard 启动项启动" : "由 guard run 启动"])
         return .registered(instance: instance, sbpl: sbpl)
     }
 
     public static func authorizationScope(forChange changeID: String) -> String { "change." + changeID }
+    public static func authorizationScope(forDisabling label: String) -> String { "disable." + label }
+    public static func authorizationScope(forRestoring label: String) -> String { "restore." + label }
+    public static func authorizationScope(forUninstall restoreOriginals: Bool) -> String { restoreOriginals ? "uninstall.restore" : "uninstall" }
     public static func authorizationScope(forRemoval profileID: String) -> String { "remove." + profileID }
     /// Restoring the original item makes it run unprotected, so it gets its own scope: authorization for a
     /// plain delete must not also cover a restore.
@@ -512,6 +635,7 @@ public final class HelperService {
             expectations.removeValue(forKey: instance)
         }
         observations.removeValue(forKey: profileID)
+        try? activity?.removeAll(profileID)
         proposals = proposals.filter { $0.value.profile.id != profileID }
         return .deleted(profileID: profileID, restoreOriginalLabel: restoreLabel)
     }
@@ -553,6 +677,55 @@ public final class HelperService {
         return .removal(label: definition.label, restoreOriginalLabel: restoreOriginal ? launch.originalLabel : nil)
     }
 
+    private func decide(_ profileID: String, suggestion: Suggestion, decision: SuggestionDecision) throws -> HelperResponse {
+        guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
+        guard let activity else { throw Failure(code: "internal_error") }
+        let current = try allPendingItems(for: latest).first { $0.suggestion == suggestion }
+        switch decision {
+        case .keepBlocked:
+            // Keeping something blocked is only meaningful when it was blocked.
+            guard let current, current.wasBlocked else { throw Failure(code: "not_blocked") }
+        case .dismissed:
+            guard current != nil else { throw Failure(code: "unknown_item") }
+        case .reopened:
+            guard activity.activeDecisions(profileID)[suggestion] != nil else { throw Failure(code: "unknown_item") }
+        }
+        try activity.record(DecisionRecord(suggestion: suggestion, decision: decision, at: clock(), evidence: current?.evidence ?? 0), profileID: profileID)
+        let title: String
+        switch decision {
+        case .keepBlocked: title = "保持阻止：\(suggestion.summary)"
+        case .dismissed: title = "不再提示：\(suggestion.summary)（权限没有改变）"
+        case .reopened: title = "重新提示：\(suggestion.summary)"
+        }
+        log(profileID, .decision, title)
+        return .ok
+    }
+
+    private func activityLog(_ profileID: String) throws -> ActivityLog {
+        guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
+        let items = (try? allPendingItems(for: latest)) ?? []
+        let archived = (activity?.activeDecisions(profileID) ?? [:]).values.sorted { $0.at > $1.at }.map { record in
+            ArchivedItem(decision: record, current: items.first { $0.suggestion == record.suggestion })
+        }
+        let recent = Array((observations[profileID] ?? []).suffix(400).reversed())
+        return ActivityLog(recent: recent, archived: archived, history: (activity?.history(profileID) ?? []).reversed(),
+                           recordsIncomplete: !collectorHealth.isHealthy)
+    }
+
+    /// Everything runs through the platform layer; the Helper decides only who may ask and what is affected.
+    private func uninstall(restoreOriginals: Bool, token: Data?) throws -> HelperResponse {
+        let summary = restoreOriginals ? ["卸载 AgentGuard，并恢复被替换的原启动方式（将无限制运行）"] : ["卸载 AgentGuard"]
+        guard verifier.verify(token: token, scope: Self.authorizationScope(forUninstall: restoreOriginals), summary: summary) else {
+            throw ApprovalError.authorizationMissing
+        }
+        let targets = try store.profileIDs().compactMap { id -> UninstallTarget? in
+            guard let latest = try store.latest(id) else { return nil }
+            return UninstallTarget(profileID: id, hasLaunchSettings: latest.launch != nil,
+                                   restoreOriginalLabel: restoreOriginals ? latest.launch?.originalLabel : nil)
+        }
+        return .uninstall(targets: targets)
+    }
+
     private func statusReport() throws -> StatusReport {
         verifyInstances()
         var targets: [String: [String]] = [:]
@@ -576,7 +749,8 @@ public final class HelperService {
                 pendingCount: (try? pendingItems(for: latest).count) ?? 0,
                 detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id),
                 unmanagedProcesses: unmanaged[id]?.map(\.pid) ?? [],
-                verificationIssues: instances.filter(\.isRunning).flatMap { verificationIssues[$0.id] ?? [] }
+                verificationIssues: instances.filter(\.isRunning).flatMap { verificationIssues[$0.id] ?? [] },
+                untrackedInstances: instances.filter(\.trackingIncomplete).map(\.id)
             )
         }
         return StatusReport(profiles: profiles, collectorProblems: collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description))
