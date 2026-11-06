@@ -89,3 +89,27 @@ import Testing
         #expect(check.isComplete)
     }
 }
+
+@Suite struct LegacyPrefixAndLoginTests {
+    typealias F = Fixtures
+
+    @Test func legacyPrefixCountsAsInherited() {
+        let p = F.profile(files: [F.ro("/Users/me/docs2/a")], extraRules: [#"(allow file-write* (prefix "/Users/me/docs"))"#])
+        let entry = EffectivePermissions.overview(of: p, templates: [], environment: F.environment).files.first { $0.path == "/Users/me/docs2/a" }
+        #expect(entry?.access == .readWrite)
+    }
+
+    @Test func loginSettingIsKeptOutsideRevisions() throws {
+        let files = InMemoryFileStore()
+        let store = LoginSettingStore(root: "/cfg", files: files)
+        var p = F.profile()
+        #expect(store.runAtLogin(of: p) == nil)
+        p.launch = LaunchSettings(executable: "/bin/x", arguments: [], workingDirectory: nil, originalLabel: nil, restartOnCleanExit: false, runAtLogin: true)
+        #expect(store.runAtLogin(of: p) == true)
+        try store.set(false, for: "knodo")
+        #expect(store.runAtLogin(of: p) == false)
+        #expect(store.applied(to: p).launch?.runAtLogin == false)
+        try store.remove("knodo")
+        #expect(store.runAtLogin(of: p) == true)
+    }
+}

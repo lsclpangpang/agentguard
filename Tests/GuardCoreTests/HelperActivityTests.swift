@@ -77,6 +77,24 @@ import Testing
         #expect(log(s)?.history.last?.details == ["+ 读写目录 /Users/me/work"])
     }
 
+    @Test func loginSettingNeedsNoRevision() throws {
+        let s = try service()
+        var p = F.profile(files: [F.rw("/Users/me/work")], revision: 2)
+        p.launch = LaunchSettings(executable: "/bin/x", arguments: [], workingDirectory: nil, originalLabel: nil, restartOnCleanExit: false, runAtLogin: true)
+        guard case let .pending(info) = s.handle(.proposeChange(profile: p), caller: F.appCaller, process: appProcess) else { Issue.record("no proposal"); return }
+        _ = s.handle(.approveChange(changeID: info.id, digest: info.digest, authorization: Data("ok".utf8)), caller: F.appCaller, process: appProcess)
+        #expect(s.handle(.setRunAtLogin(profileID: "knodo", enabled: false), caller: F.appCaller, process: appProcess)
+            == .relocateLaunchAgent(profileID: "knodo", runAtLogin: false))
+        #expect(try store.latest("knodo")?.revision == 2)
+        #expect(s.handle(.applyLoginSetting(profileID: "knodo"), caller: F.appCaller, process: appProcess)
+            == .relocateLaunchAgent(profileID: "knodo", runAtLogin: false))
+    }
+
+    @Test func olderHelperItemsAreNotCalledUnblocked() throws {
+        let item = try JSONDecoder().decode(PendingItem.self, from: Data(#"{"suggestion":{"outboundTCP":{}},"sensitive":false,"evidence":3,"samples":[]}"#.utf8))
+        #expect(!item.refusalKnown && !item.isSuggestionOnly && !item.wasBlocked)
+    }
+
     @Test func stopAndLoginSettingGoToThePlatform() throws {
         let s = try service()
         #expect(s.handle(.stopManaged(profileID: "knodo"), caller: F.appCaller, process: appProcess) == .stopManaged(profileID: "knodo"))

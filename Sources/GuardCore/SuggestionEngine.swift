@@ -46,6 +46,8 @@ public struct PendingItem: Hashable, Sendable, Codable {
     public var denied: Int
     public var firstSeen: Date?
     public var lastSeen: Date?
+    /// False for items from an older Helper, which did not tell refusals from successes.
+    public var refusalKnown: Bool = true
 
     public init(suggestion: Suggestion, sensitive: Bool, evidence: Int, samples: [String], denied: Int = 0, firstSeen: Date? = nil, lastSeen: Date? = nil) {
         self.suggestion = suggestion
@@ -59,19 +61,23 @@ public struct PendingItem: Hashable, Sendable, Codable {
 
     /// Blocked accesses are evidence of a refusal; the rest is a suggestion.
     public var wasBlocked: Bool { denied > 0 }
+    /// Observed succeeding and never refused: only then may it be described as "not blocked".
+    public var isSuggestionOnly: Bool { refusalKnown && denied == 0 }
 
     enum CodingKeys: String, CodingKey {
         case suggestion, sensitive, evidence, samples, denied, firstSeen, lastSeen
     }
 
-    /// An older Helper reports no denial counts; its items were all treated as blocked before.
+    /// An older Helper reports no denial counts, so whether an item was blocked is unknown.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         suggestion = try c.decode(Suggestion.self, forKey: .suggestion)
         sensitive = try c.decode(Bool.self, forKey: .sensitive)
         evidence = try c.decode(Int.self, forKey: .evidence)
         samples = try c.decode([String].self, forKey: .samples)
-        denied = try c.decodeIfPresent(Int.self, forKey: .denied) ?? 0
+        let denied = try c.decodeIfPresent(Int.self, forKey: .denied)
+        self.denied = denied ?? 0
+        refusalKnown = denied != nil
         firstSeen = try c.decodeIfPresent(Date.self, forKey: .firstSeen)
         lastSeen = try c.decodeIfPresent(Date.self, forKey: .lastSeen)
     }

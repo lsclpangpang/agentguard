@@ -117,7 +117,7 @@ final class HelperCore {
             defer {
                 switch request {
                 case .approveChange, .applyTightening, .installLaunchAgent, .restartManagedInstance, .removeManagement, .deleteProfile,
-                     .stopManaged, .applyLoginSetting, .disableLaunchItem, .restoreLaunchItem, .uninstall:
+                     .stopManaged, .applyLoginSetting, .setRunAtLogin, .disableLaunchItem, .restoreLaunchItem, .uninstall:
                     refreshLaunchStatus(invalidate: true)
                 default: break
                 }
@@ -290,6 +290,7 @@ final class HelperCore {
             let plan = validatedTargets(profileID)
             do {
                 operationWarnings += try launchController(config: config, owner: owner).stop(profileID: profileID) { self.stop(plan, profileID: profileID) }
+                service?.recordHistory(profileID, .stopped, "停止本次运行", operationStop?.unconfirmed ?? [])
             } catch {
                 return .failure(code: "startup_error:" + String(describing: error))
             }
@@ -301,7 +302,10 @@ final class HelperCore {
                 return .failure(code: "startup_error:" + String(describing: error))
             }
         case let .disableLaunchItem(profileID, label, path):
-            do { try launchController(config: config, owner: owner).disable(label: label, path: path, profileID: profileID) }
+            do {
+                try launchController(config: config, owner: owner).disable(label: label, path: path, profileID: profileID)
+                service?.recordHistory(profileID, .decision, "停用其他启动入口 \(label)", [path])
+            }
             catch { return .failure(code: "startup_error:" + String(describing: error)) }
         case let .restoreLaunchItem(label):
             do { try launchController(config: config, owner: owner).restoreDisabled(label: label) }
@@ -327,6 +331,8 @@ final class HelperCore {
                                                            hasLaunchSettings: target.hasLaunchSettings) { self.stop(plan, profileID: target.profileID) }
             } catch {
                 operationWarnings.append("\(target.profileID)：未能移除启动项（\(error)），请在重新安装后处理")
+                // The programs are stopped anyway: nothing would manage them once the Helper is gone.
+                stop(plan, profileID: target.profileID)
             }
         }
         if restoreDisabled {
@@ -380,6 +386,9 @@ final class HelperCore {
         deadline = Date().addingTimeInterval(1)
         while Date() < deadline, lingering.contains(where: stillSame) { usleep(50_000) }
         let survivors = lingering.filter(stillSame)
+        // Restored processes are keyed by birth time, so the collector's exit events never match
+        // them; settle the tracker now, or the stopped instance still looks running (and untracked).
+        reconcileInstances()
         var outcome = operationStop ?? StopOutcome()
         outcome.stopped += targets.keys.filter { !lingering.contains($0) }
         outcome.forced += lingering.filter { !survivors.contains($0) }
@@ -396,7 +405,9 @@ final class HelperCore {
 
     private func installLaunchAgent(label: String, profileID: String, originalLabel: String?, plist: Data,
                                     config: AgentGuardConfig, owner: OwnerRecord, restart: Bool = false) throws {
-        guard let launch = try config.store.latest(profileID)?.launch else { throw LaunchItemError.operationFailed }
+        guard let latest = try config.store.latest(profileID),
+              let launch = LoginSettingStore(root: config.configRoot, files: LocalFileStore()).applied(to: latest).launch
+        else { throw LaunchItemError.operationFailed }
         let plan = validatedTargets(profileID)
         let warnings = try launchController(config: config, owner: owner).install(profileID: profileID, launch: launch, label: label, plist: plist, restart: restart) {
             self.stop(plan, profileID: profileID)

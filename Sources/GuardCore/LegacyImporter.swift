@@ -103,7 +103,7 @@ public enum MigrationPreview {
     public static func lines(for result: ImportResult, templates: [Template], environment: CompileEnvironment) -> [String] {
         let profile = result.profile
         let overview = EffectivePermissions.overview(of: profile, templates: templates, environment: environment)
-        var lines = ["保留现有的全部访问权限，不会扩大，也不会悄悄收窄："]
+        var lines = ["保留现有安装中能导入的全部访问权限，不会扩大（无法导入的规则单独列在下面）："]
         for entry in overview.files {
             let source: String
             switch entry.sources.first?.source {
@@ -116,6 +116,8 @@ public enum MigrationPreview {
         if profile.unrestrictedExec { lines.append("  允许运行任意程序（原安装就是这样）") }
         for exec in overview.exec where !profile.unrestrictedExec { lines.append("  运行 \(exec.path)") }
         if profile.network.outboundTCP == .allowed { lines.append("  允许对外 TCP 连接") }
+        if profile.network.listen == .allowed { lines.append("  允许接收连接（监听端口）") }
+        if profile.network.udp == .allowed { lines.append("  允许 UDP") }
         if !profile.network.loopbackTCPConnect.isEmpty {
             lines.append("  连接本机端口 \(profile.network.loopbackTCPConnect.map(String.init).joined(separator: "、"))")
         }

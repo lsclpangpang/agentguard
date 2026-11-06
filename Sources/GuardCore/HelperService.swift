@@ -41,6 +41,8 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case stopManaged(profileID: String)
     /// Puts the managed launch item where the saved login setting says, without stopping anything.
     case applyLoginSetting(profileID: String)
+    /// Stores the login setting outside the revisions and applies it; nothing is stopped or started.
+    case setRunAtLogin(profileID: String, enabled: Bool)
     /// Backs up and unloads another launch item that starts the same program outside AgentGuard.
     case disableLaunchItem(profileID: String, label: String, path: String, authorization: Data?)
     /// Puts back a launch item disabled earlier; it then runs outside AgentGuard again.
@@ -250,6 +252,7 @@ public final class HelperService {
     private var expectations: [Int: [SandboxExpectation]] = [:]
     private let probe: (any SandboxProbe)?
     private let activity: ActivityStore?
+    private let login: LoginSettingStore
     /// How long a registered process may take to apply its sandbox before it counts as unprotected.
     public static let sandboxGracePeriod: TimeInterval = 15
     private var nextInstance = 1
@@ -270,6 +273,7 @@ public final class HelperService {
         self.store = store
         self.probe = probe
         self.activity = activity
+        self.login = LoginSettingStore(root: store.root, files: activity?.files ?? InMemoryFileStore())
         self.environment = environment
         self.compiler = PolicyCompiler(environment: environment)
         self.renderer = SBPLRenderer(environment: environment)
@@ -352,6 +356,11 @@ public final class HelperService {
                 }
             }
         }
+    }
+
+    /// For the platform layer: records an action in the history once it actually completed.
+    public func recordHistory(_ profileID: String, _ kind: HistoryKind, _ title: String, _ details: [String] = []) {
+        log(profileID, kind, title, details)
     }
 
     private func log(_ profileID: String, _ kind: HistoryKind, _ title: String, _ details: [String] = []) {
@@ -478,12 +487,17 @@ public final class HelperService {
             case let .stopManaged(profileID):
                 try require(role, in: [.app])
                 guard try store.latest(profileID) != nil else { throw Failure(code: "unknown_profile") }
-                log(profileID, .stopped, "停止本次运行")
                 return .stopManaged(profileID: profileID)
             case let .applyLoginSetting(profileID):
                 try require(role, in: [.app])
-                guard let launch = try store.latest(profileID)?.launch else { throw Failure(code: "no_launch_settings") }
-                return .relocateLaunchAgent(profileID: profileID, runAtLogin: launch.runAtLogin)
+                guard let latest = try store.latest(profileID), let runAtLogin = login.runAtLogin(of: latest) else { throw Failure(code: "no_launch_settings") }
+                return .relocateLaunchAgent(profileID: profileID, runAtLogin: runAtLogin)
+            case let .setRunAtLogin(profileID, enabled):
+                try require(role, in: [.app])
+                guard try store.latest(profileID)?.launch != nil else { throw Failure(code: "no_launch_settings") }
+                try login.set(enabled, for: profileID)
+                log(profileID, .decision, enabled ? "开启登录自启" : "关闭登录自启", ["只影响以后的登录"])
+                return .relocateLaunchAgent(profileID: profileID, runAtLogin: enabled)
             case let .disableLaunchItem(profileID, label, path, authorization):
                 try require(role, in: [.app])
                 guard try store.latest(profileID) != nil else { throw Failure(code: "unknown_profile") }
@@ -491,7 +505,6 @@ public final class HelperService {
                 guard verifier.verify(token: authorization, scope: Self.authorizationScope(forDisabling: label), summary: ["停用启动项 \(label)"]) else {
                     throw ApprovalError.authorizationMissing
                 }
-                log(profileID, .decision, "停用其他启动入口 \(label)", [path])
                 return .disableLaunchItem(profileID: profileID, label: label, path: path)
             case let .restoreLaunchItem(label, authorization):
                 try require(role, in: [.app])
@@ -636,6 +649,7 @@ public final class HelperService {
         }
         observations.removeValue(forKey: profileID)
         try? activity?.removeAll(profileID)
+        try? login.remove(profileID)
         proposals = proposals.filter { $0.value.profile.id != profileID }
         return .deleted(profileID: profileID, restoreOriginalLabel: restoreLabel)
     }

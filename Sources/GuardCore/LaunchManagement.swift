@@ -62,3 +62,45 @@ public enum LaunchArguments {
         }.joined(separator: " ")
     }
 }
+
+/// The login setting changed after a profile was saved. It is kept apart from the approved
+/// revisions: it changes no permission, so it must neither need authorization nor make a running
+/// program look out of date. `<root>/login/<profile>.json`; absent means the profile's own value.
+public struct LoginSettingStore: Sendable {
+    public let root: String
+    let files: any FileStore
+
+    public init(root: String, files: any FileStore) {
+        self.root = root
+        self.files = files
+    }
+
+    private struct Record: Codable { var runAtLogin: Bool }
+
+    public func override(_ profileID: String) -> Bool? {
+        guard ProfileID.isValid(profileID), let data = try? files.read(root + "/login/" + profileID + ".json") else { return nil }
+        return (try? JSONDecoder().decode(Record.self, from: data))?.runAtLogin
+    }
+
+    public func runAtLogin(of profile: Profile) -> Bool? {
+        guard let launch = profile.launch else { return nil }
+        return override(profile.id) ?? launch.runAtLogin
+    }
+
+    /// The profile with the stored login setting applied.
+    public func applied(to profile: Profile) -> Profile {
+        var copy = profile
+        if let value = override(profile.id) { copy.launch?.runAtLogin = value }
+        return copy
+    }
+
+    public func set(_ value: Bool, for profileID: String) throws {
+        guard ProfileID.isValid(profileID) else { throw StoreError.invalidProfileID(profileID) }
+        try files.writeAtomically(try JSONEncoder().encode(Record(runAtLogin: value)), to: root + "/login/" + profileID + ".json")
+    }
+
+    public func remove(_ profileID: String) throws {
+        guard ProfileID.isValid(profileID) else { return }
+        try files.remove(root + "/login/" + profileID + ".json")
+    }
+}

@@ -82,6 +82,13 @@ import Testing
         #expect(s.next == .restartAndApply)
     }
 
+    @Test func unprotectedObservationIsNeverGreen() {
+        var report = status(.applied(running: true))
+        report.mode = .unprotectedObserve
+        let s = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
+        #expect(s.level == .problem && s.headline == "运行中 · 没有保护")
+    }
+
     @Test func staleIsNeverGreen() {
         let s = ProgramStatusSummary.evaluate(status(.applied(running: true)), freshness: .stale(confirmedAt: nil), programName: "Knodo", hasLaunch: true)
         #expect(s.headline == "状态待确认" && s.level == .attention)

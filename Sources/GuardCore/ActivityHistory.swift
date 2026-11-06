@@ -81,7 +81,7 @@ public struct ActivityLog: Codable, Equatable, Sendable {
 /// `<root>/activity/<profile>/{decisions,history}.json`.
 public struct ActivityStore: Sendable {
     public let root: String
-    private let files: any FileStore
+    let files: any FileStore
     static let historyLimit = 500
     static let decisionLimit = 1000
 

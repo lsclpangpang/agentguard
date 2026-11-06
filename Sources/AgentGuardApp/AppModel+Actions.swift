@@ -17,7 +17,7 @@ extension AppModel {
         var lines = running.isEmpty ? ["结束 \(id) 仍在运行的受管进程（如果有）"]
             : ["结束 \(id) 正在运行的 \(running.count) 个副本（#\(running.map(String.init).joined(separator: "、#"))）及其子进程"]
         lines.append("本次登录期间不会自动重新启动")
-        if profile(id)?.launch?.runAtLogin == true { lines.append("登录自启保持开启：下次登录 Mac 时仍会自动启动") }
+        if runAtLogin(id) == true { lines.append("登录自启保持开启：下次登录 Mac 时仍会自动启动") }
         lines.append("正在进行的任务会被中断")
         Task {
             guard await askConfirmation("停止 \(id) 的本次运行", lines) else { return }
@@ -30,15 +30,18 @@ extension AppModel {
         Task { await sendAsync(.applyLoginSetting(profileID: id)) }
     }
 
-    /// Saves the login setting and applies it right away; whether the program runs now is not changed.
+    /// The login setting in effect: the one changed with the switch, else the profile's own.
+    func runAtLogin(_ id: String) -> Bool? {
+        profile(id).flatMap { LoginSettingStore(root: config.configRoot, files: LocalFileStore()).runAtLogin(of: $0) }
+    }
+
+    /// Changes the login setting and applies it right away. It is not a permission, so it needs no
+    /// authorization and does not make the running program out of date; nothing is stopped or started.
     func setRunAtLogin(_ enabled: Bool, for id: String) {
-        guard var profile = profile(id), var launch = profile.launch, launch.runAtLogin != enabled else { return }
-        launch.runAtLogin = enabled
-        profile.launch = launch
-        profile.revision += 1
+        guard runAtLogin(id) != enabled else { return }
         Task {
-            guard case .applied = await submitAsync(profile) else { return }
-            await sendAsync(.applyLoginSetting(profileID: id))
+            await sendAsync(.setRunAtLogin(profileID: id, enabled: enabled))
+            objectWillChange.send()
         }
     }
 
@@ -55,7 +58,8 @@ extension AppModel {
             }
             return (entries, LaunchItemController.disabledItems(in: disabledDirectory))
         }.value
-        let profiles = (report?.profiles ?? []).compactMap { profile($0.profileID) }
+        let login = LoginSettingStore(root: config.configRoot, files: LocalFileStore())
+        let profiles = (report?.profiles ?? []).compactMap { profile($0.profileID) }.map(login.applied)
         return InstallationSurvey.survey(profiles: profiles, entries: found.0, disabled: found.1, status: report?.profiles ?? [],
                                          resolver: config.environment.resolver, caseInsensitive: config.environment.caseInsensitive)
     }
@@ -107,7 +111,7 @@ extension AppModel {
 
     func decide(_ suggestion: Suggestion, _ decision: SuggestionDecision, for id: String) {
         Task {
-            await sendAsync(.decide(profileID: id, suggestion: suggestion, decision: decision))
+            guard await sendAsync(.decide(profileID: id, suggestion: suggestion, decision: decision)) else { return }
             if decision == .keepBlocked { lastNotice = "已保持阻止：\(suggestion.summary)。权限没有改变，相同的访问以后会归入这条记录。" }
             loadActivity(id)
         }
@@ -171,7 +175,7 @@ extension AppModel {
             if let profile = profile(status.profileID) {
                 lines.append("  旧规则：\(profile.extraRules.count) 条")
                 if let launch = profile.launch {
-                    lines.append("  启动入口：\(launch.executable)，原启动项：\(launch.originalLabel ?? "无")，登录自启：\(launch.runAtLogin ? "开" : "关")")
+                    lines.append("  启动入口：\(launch.executable)，原启动项：\(launch.originalLabel ?? "无")，登录自启：\(runAtLogin(status.profileID) == true ? "开" : "关")")
                 }
             }
         }

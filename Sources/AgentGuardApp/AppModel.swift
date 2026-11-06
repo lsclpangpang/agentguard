@@ -383,24 +383,33 @@ final class AppModel: ObservableObject {
         if !running.isEmpty { lines.insert("先停止正在运行的 \(running.count) 个副本（#\(running.map(String.init).joined(separator: "、#"))）", at: 0) }
         Task {
             guard await askConfirmation("移除 \(id) 的保护", lines) else { return }
+            let restores = restoreOriginal && originalLabel != nil
+            // Authorize first: cancelling the prompt must leave the program as it was, not stopped.
+            let token = await Task.detached { () -> Result<Data?, Error> in
+                Result {
+                    let prompt = "AgentGuard 将删除配置档 \(id)" + (restores ? "，并恢复原启动项（之后将无限制运行）" : "")
+                    return try UserAuthorization.obtain(scope: HelperService.authorizationScope(forDeletion: id, restoreOriginal: restores), prompt: prompt)
+                }
+            }.value
+            guard case let .success(authorization) = token else {
+                if case let .failure(error) = token { lastError = "\(error)" }
+                return
+            }
             if !running.isEmpty {
                 guard await sendAsync(.stopManaged(profileID: id), refreshAfter: false) else { return }
-                _ = await refreshReport()
+                // Exits are settled within a moment; wait for the report to show it rather than racing it.
+                let deadline = Date().addingTimeInterval(6)
+                while Date() < deadline {
+                    if let report = await refreshReport(includePending: false),
+                       report.profiles.first(where: { $0.profileID == id })?.runningInstances.isEmpty ?? true { break }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
                 if !(status(for: id)?.runningInstances.isEmpty ?? true) {
                     lastError = "还有运行中的副本没有确认停止，没有删除。请稍后重试或手动结束它们。"
                     return
                 }
             }
-            Task.detached {
-                do {
-                    let restores = restoreOriginal && originalLabel != nil
-                    let prompt = "AgentGuard 将删除配置档 \(id)" + (restores ? "，并恢复原启动项（之后将无限制运行）" : "")
-                    let token = try UserAuthorization.obtain(scope: HelperService.authorizationScope(forDeletion: id, restoreOriginal: restores), prompt: prompt)
-                    await self.sendAsync(.deleteProfile(profileID: id, restoreOriginal: restoreOriginal, authorization: token))
-                } catch {
-                    await MainActor.run { self.lastError = "\(error)" }
-                }
-            }
+            await sendAsync(.deleteProfile(profileID: id, restoreOriginal: restoreOriginal, authorization: authorization))
         }
     }
 
@@ -478,7 +487,7 @@ final class AppModel: ObservableObject {
         Task {
             guard let launch = profile(id)?.launch else { return }
             var lines = ["按已保存的权限启动：" + LaunchArguments.format([launch.executable] + launch.arguments),
-                         launch.runAtLogin ? "启用登录自启，后续登录也通过 AgentGuard 启动" : "仅在本次登录中启动，不添加登录自启"]
+                         runAtLogin(id) ?? launch.runAtLogin ? "启用登录自启，后续登录也通过 AgentGuard 启动" : "仅在本次登录中启动，不添加登录自启"]
             if !(status(for: id)?.runningInstances.isEmpty ?? true) {
                 lines.insert("结束 \(id) 当前运行的副本，正在进行的任务会被中断；重启后旧权限才会收回", at: 0)
             }

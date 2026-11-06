@@ -124,6 +124,11 @@ public struct ProgramStatusSummary: Equatable, Sendable {
             return ProgramStatusSummary(headline: "状态待确认", impact: "最近没有收到 Helper 的确认，下面显示的可能不是当前情况。",
                                         next: .checkAndRecover, level: .attention)
         }
+        // Unprotected observation runs under `(allow default)`: verification passing says nothing about limits.
+        if status.mode.liftsBoundary && !status.runningInstances.isEmpty {
+            return ProgramStatusSummary(headline: "运行中 · 没有保护", impact: "\(programName) 处于无保护观察模式，只记录不限制，下面的权限现在不起作用。",
+                                        next: .restart, level: .problem)
+        }
         var summary: ProgramStatusSummary
         switch status.revisionState {
         case .applied(running: true) where !status.untrackedInstances.isEmpty:

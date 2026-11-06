@@ -63,7 +63,20 @@ struct ActivityTab: View {
     }
 
     @ViewBuilder private var suggestions: some View {
-        let list = items.filter { !$0.wasBlocked }
+        let unknown = items.filter { !$0.wasBlocked && !$0.refusalKnown }
+        if !unknown.isEmpty {
+            Card(title: "需要处理的访问", systemImage: "questionmark.circle",
+                 subtitle: "后台服务是旧版本，无法区分这些访问是否被阻止。更新后台服务后会分开显示。") {
+                VStack(spacing: 2) {
+                    ForEach(unknown, id: \.self) { item in
+                        PendingRow(item: item, selected: binding(item), templates: model.templates) {
+                            Button("允许…") { model.acceptAll([item], for: profileID) }
+                        }
+                    }
+                }
+            }
+        }
+        let list = items.filter(\.isSuggestionOnly)
         if !list.isEmpty {
             Card(title: "权限建议", systemImage: "lightbulb",
                  subtitle: "这些访问没有被阻止（可能由系统基础规则或旧规则放行），只是当前权限没有明确包含它们。加入权限后会明确列出；不处理也不会改变现在的行为。") {
@@ -202,7 +215,7 @@ private struct PendingRow<Actions: View>: View {
     }
 
     private var evidence: String {
-        var text = item.wasBlocked ? "被阻止 \(item.denied) 次" : "成功 \(item.evidence) 次"
+        var text = item.wasBlocked ? "被阻止 \(item.denied) 次" : item.refusalKnown ? "成功 \(item.evidence) 次" : "出现 \(item.evidence) 次"
         if item.wasBlocked && item.evidence > item.denied { text += "，成功 \(item.evidence - item.denied) 次" }
         if let last = item.lastSeen { text += " · 最近 \(last.formatted(date: .omitted, time: .shortened))" }
         return text

@@ -116,6 +116,12 @@ public enum EffectivePermissions {
                 inherited += patternGrants(in: grants).filter { grant, pattern in
                     pattern.covers(here, kind: grant.kind, caseInsensitive: ci)
                 }.map(\.0)
+                // A legacy string prefix reaches every path that starts with it.
+                inherited += grants.filter { grant in
+                    guard isLegacyPrefix(grant), grant.path != first.path else { return false }
+                    let prefix = String(grant.path.dropLast())
+                    return ci ? here.value.lowercased().hasPrefix(prefix.lowercased()) : here.value.hasPrefix(prefix)
+                }
             }
             return PermissionEntry(path: first.path, kind: kind, pattern: first.pattern, sources: sources, inherited: inherited)
         }

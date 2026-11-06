@@ -20,7 +20,7 @@ struct LaunchCard: View {
     private var ready: Bool { model.helperReachable && !busy }
     private var needsApply: Bool {
         guard let launch = profile.launch, let startup, startup.problem == nil else { return false }
-        return (startup.registered || startup.runAtLogin) && launch.runAtLogin != startup.runAtLogin
+        return (startup.registered || startup.runAtLogin) && (model.runAtLogin(profile.id) ?? launch.runAtLogin) != startup.runAtLogin
     }
 
     var body: some View {
@@ -52,7 +52,7 @@ struct LaunchCard: View {
                     Text(LaunchArguments.format([PathLabel.abbreviate(launch.executable)] + launch.arguments))
                         .font(.system(.callout, design: .monospaced))
                         .textSelection(.enabled).lineLimit(3).truncationMode(.middle)
-                    SwiftUI.Toggle(isOn: Binding(get: { launch.runAtLogin }, set: { model.setRunAtLogin($0, for: profile.id) })) {
+                    SwiftUI.Toggle(isOn: Binding(get: { model.runAtLogin(profile.id) ?? launch.runAtLogin }, set: { model.setRunAtLogin($0, for: profile.id) })) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("登录 Mac 时自动启动 \(profile.id)")
                             Text("只影响以后的登录，不会停止或启动现在的程序。").font(.caption).foregroundStyle(.secondary)
@@ -201,9 +201,7 @@ private struct LaunchSettingsSheet: View {
             TextField("可选，例如 --data-dir \"/路径/包含 空格\"", text: $arguments).textFieldStyle(.roundedBorder)
             Text("工作目录").font(.headline)
             TextField("可选，留空使用此配置的工作区", text: $directory).textFieldStyle(.roundedBorder)
-            Toggle("登录 Mac 时自动启动", isOn: $runAtLogin)
-            Text(runAtLogin ? "点击启动后启用登录自启，异常退出后会尝试重新启动。" : "点击启动后仅在本次登录中运行，下次登录不会自动启动。")
-                .font(.caption).foregroundStyle(.secondary)
+            Text("登录自启在“启动方式”卡片上单独开关，这里不改变它。").font(.caption).foregroundStyle(.secondary)
             if let originalLabel {
                 Text("将替换原自启任务：\(originalLabel)").font(.caption).foregroundStyle(.secondary)
                 if lockOriginal { Text("原启动方式已有备份；如需更换关联任务，请先恢复原启动方式。").font(.caption).foregroundStyle(.secondary) }
