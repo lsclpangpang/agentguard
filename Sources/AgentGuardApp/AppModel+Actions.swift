@@ -221,7 +221,7 @@ extension AppModel {
                 lastWarning = [lastWarning, "后台服务没有完全移除：\(error.localizedDescription)。请在“系统设置 > 通用 > 登录项”中关闭 AgentGuard。"]
                     .compactMap { $0 }.joined(separator: "\n")
             }
-            try? SMAppService.mainApp.unregister()
+            try? await SMAppService.mainApp.unregister()
             lastNotice = [lastNotice, "AgentGuard 的后台组件已移除。现在可以退出 AgentGuard，并把它从“应用程序”文件夹移到废纸篓。"]
                 .compactMap { $0 }.joined(separator: "\n")
             refresh()
