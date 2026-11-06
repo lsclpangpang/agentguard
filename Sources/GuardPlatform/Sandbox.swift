@@ -41,7 +41,8 @@ public struct SystemSandboxProbe: SandboxProbe {
 
     public func isSandboxed(pid: Int32) -> Bool? {
         switch agentguard_sandbox_is_sandboxed(pid) {
-        case 0: return false
+        // A process that exited between choosing it and probing it must not read as "not sandboxed".
+        case 0: return kill(pid, 0) == 0 ? false : nil
         case 1: return true
         default: return nil
         }

@@ -43,7 +43,14 @@ extension AppModel {
             edit(id) { profile in profile.files.removeAll { $0 == grant } }
             return
         }
-        guard let profile = profile(id), let legacy = legacyRevocation(grant.path, keeping: nil, in: profile) else { return }
+        guard let profile = profile(id) else { return }
+        // A grant whose path cannot be read is exactly the one to delete, so it is removed without the analysis.
+        guard let legacy = try? legacyRevocation(grant.path, keeping: nil, in: profile) else {
+            edit(id, warnings: ["注意：\(grant.path) 不是可用的路径，无法核对旧规则是否仍允许访问它"]) { profile in
+                profile.files.removeAll { $0 == grant }
+            }
+            return
+        }
         edit(id, warnings: Self.legacyWarnings(legacy, path: grant.path, revoked: "访问")) { profile in
             profile.files.removeAll { $0 == grant }
             profile.extraRules = legacy.extraRules
@@ -52,14 +59,9 @@ extension AppModel {
 
     /// Legacy rules at or below the path are dropped with it; any that reach it from above, or whose
     /// reach is unknown, are named before the change so it is not mistaken for a full revocation.
-    private func legacyRevocation(_ path: String, keeping access: Access?, in profile: Profile) -> LegacyRevocation? {
-        do {
-            return try LegacyRevocation.revoke(path, keeping: access, from: profile.extraRules, resolver: config.environment.resolver,
-                                               caseInsensitive: config.environment.caseInsensitive)
-        } catch {
-            lastError = "没有保存：" + ((error as? PathError)?.displayText ?? String(describing: error))
-            return nil
-        }
+    private func legacyRevocation(_ path: String, keeping access: Access?, in profile: Profile) throws -> LegacyRevocation {
+        try LegacyRevocation.revoke(path, keeping: access, from: profile.extraRules, resolver: config.environment.resolver,
+                                    caseInsensitive: config.environment.caseInsensitive)
     }
 
     nonisolated static func legacyWarnings(_ legacy: LegacyRevocation, path: String, revoked: String) -> [String] {
@@ -81,7 +83,7 @@ extension AppModel {
                 edit(id, unchangedHint: hint) { $0.files = files }
                 return
             }
-            guard let legacy = legacyRevocation(grant.path, keeping: .readOnly, in: profile) else { return }
+            let legacy = try legacyRevocation(grant.path, keeping: .readOnly, in: profile)
             edit(id, unchangedHint: hint, warnings: Self.legacyWarnings(legacy, path: grant.path, revoked: "写入")) {
                 $0.files = files
                 $0.extraRules = legacy.extraRules

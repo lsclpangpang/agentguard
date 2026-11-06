@@ -328,6 +328,11 @@ public struct PolicyCompiler: Sendable {
             merged[key] = entry
         }
         let result = merged.values.sorted { ($0.pattern.value, $0.kind.rawValue) < ($1.pattern.value, $1.kind.rawValue) }
+        // Like a plain grant, a pattern may not open `/` or the home directory as a whole (`/Users/*`, `/U*`).
+        let root = try canonical("/")
+        for grant in result where [root, home].contains(where: { grant.pattern.covers($0, kind: grant.kind, caseInsensitive: caseInsensitive) }) {
+            throw CompileError.forbiddenPath(grant.pattern.value)
+        }
         let protected = try environment.protectedPaths.map(canonical)
         let writeProtected = try environment.writeProtectedPaths.map(canonical)
         for grant in result {
@@ -337,9 +342,20 @@ public struct PolicyCompiler: Sendable {
             for area in writeProtected where grant.access == .readWrite && grant.pattern.mayReachInside(area, kind: grant.kind, caseInsensitive: caseInsensitive) {
                 throw CompileError.overlapsProtectedPath(grant: grant.pattern.value, protected: area.value)
             }
-            if !environment.allowsNestedReadOnly, grant.access == .readOnly,
-               let outer = files.first(where: { $0.access == .readWrite && $0.kind == .directory && $0.path.contains(grant.pattern.base, caseInsensitive: caseInsensitive) }) {
+            guard !environment.allowsNestedReadOnly else { continue }
+            // A read-only pattern that shares any path with a writable directory only looks like a restriction.
+            if grant.access == .readOnly, let outer = files.first(where: {
+                $0.access == .readWrite && $0.kind == .directory
+                    && ($0.path.contains(grant.pattern.base, caseInsensitive: caseInsensitive)
+                        || grant.pattern.mayReachInside($0.path, kind: grant.kind, caseInsensitive: caseInsensitive))
+            }) {
                 throw CompileError.nestedReadOnlyInsideReadWrite(inner: grant.pattern.value, outer: outer.path.value)
+            }
+            // Likewise a read-only plain grant that a writable pattern covers.
+            if grant.access == .readWrite, let inner = files.first(where: {
+                $0.access == .readOnly && grant.pattern.covers($0.path, kind: grant.kind, caseInsensitive: caseInsensitive)
+            }) {
+                throw CompileError.nestedReadOnlyInsideReadWrite(inner: inner.path.value, outer: grant.pattern.value)
             }
         }
         return result

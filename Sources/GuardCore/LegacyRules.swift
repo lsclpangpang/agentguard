@@ -37,33 +37,37 @@ public struct LegacyRuleAnalysis: Equatable, Sendable {
 
     public var hasUnverifiedFileRules: Bool { !unverified.isEmpty }
 
-    /// Rules granting at least `access` at `path` itself or anywhere below it. Removing them is
-    /// part of revoking `path`; they reach nothing the user did not ask to revoke.
+    /// Rules granting at least `access` only at `path` itself or below it: every filter is within.
+    /// Removing them is part of revoking `path`; they reach nothing the user did not ask to revoke.
     public func rulesWithin(_ path: CanonicalPath, access: Access) -> [String] {
         fileRules.filter { rule in
-            rule.access >= access && rule.matches.contains { match in
-                switch match {
-                case let .subpath(p), let .literal(p): return path.contains(p, caseInsensitive: caseInsensitive)
-                // A prefix equal to the path also reaches its siblings (`/a/b` matches `/a/bc`), so it is not within.
-                case let .prefix(text): return text.lowercasedIf(caseInsensitive).hasPrefix(Self.directoryPrefix(path).lowercasedIf(caseInsensitive))
-                }
-            }
+            rule.access >= access && rule.matches.allSatisfy { isWithin($0, path) }
         }.map(\.rule)
     }
 
-    /// Rules granting at least `access` at `path` from a location above it, which an edit of
-    /// `path` cannot remove without revoking more than asked.
+    /// Rules granting at least `access` at `path` that an edit of `path` cannot drop without
+    /// revoking more than asked: they reach it from above, or also reach places outside it.
     public func rulesAbove(_ path: CanonicalPath, access: Access) -> [String] {
-        let within = Set(rulesWithin(path, access: access))
-        return fileRules.filter { rule in
-            !within.contains(rule.rule) && rule.access >= access && rule.matches.contains { match in
-                switch match {
-                case let .subpath(p): return p.contains(path, caseInsensitive: caseInsensitive)
-                case .literal: return false
-                case let .prefix(text): return path.value.lowercasedIf(caseInsensitive).hasPrefix(text.lowercasedIf(caseInsensitive))
-                }
-            }
+        fileRules.filter { rule in
+            guard rule.access >= access, !rule.matches.allSatisfy({ isWithin($0, path) }) else { return false }
+            return rule.matches.contains { isWithin($0, path) || isAbove($0, path) }
         }.map(\.rule)
+    }
+
+    private func isWithin(_ match: LegacyFileRule.Match, _ path: CanonicalPath) -> Bool {
+        switch match {
+        case let .subpath(p), let .literal(p): return path.contains(p, caseInsensitive: caseInsensitive)
+        // A prefix equal to the path also reaches its siblings (`/a/b` matches `/a/bc`), so it is not within.
+        case let .prefix(text): return text.lowercasedIf(caseInsensitive).hasPrefix(Self.directoryPrefix(path).lowercasedIf(caseInsensitive))
+        }
+    }
+
+    private func isAbove(_ match: LegacyFileRule.Match, _ path: CanonicalPath) -> Bool {
+        switch match {
+        case let .subpath(p): return p.contains(path, caseInsensitive: caseInsensitive)
+        case .literal: return false
+        case let .prefix(text): return path.value.lowercasedIf(caseInsensitive).hasPrefix(text.lowercasedIf(caseInsensitive))
+        }
     }
 
     private static func directoryPrefix(_ path: CanonicalPath) -> String {
@@ -87,7 +91,8 @@ public struct LegacyRuleAnalysis: Equatable, Sendable {
             case .string: return .unverified
             }
         }
-        let fileOperations = operations.filter { $0 == "file*" || $0.hasPrefix("file-") }
+        // Only operations on contents count as access; metadata, ioctl, mapping and the like do not.
+        let fileOperations = operations.filter { $0 == "file*" || $0 == "file-read*" || $0 == "file-read-data" || $0.hasPrefix("file-write") }
         guard !fileOperations.isEmpty else { return operations.isEmpty ? .unverified : .other }
         let access: Access = fileOperations.contains { $0 == "file*" || $0.hasPrefix("file-write") } ? .readWrite : .readOnly
         guard let root = try? CanonicalPath("/", resolver: resolver) else { return .unverified }

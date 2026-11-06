@@ -58,6 +58,12 @@ public struct PathPattern: Hashable, Sendable, CustomStringConvertible {
         }
     }
 
+    /// True when the grant covers `path` itself: a match, or for a directory-kind grant a match or
+    /// anything below one.
+    public func covers(_ path: CanonicalPath, kind: PathKind, caseInsensitive: Bool) -> Bool {
+        kind == .directory ? mayCover(path, caseInsensitive: caseInsensitive) : matches(path, caseInsensitive: caseInsensitive)
+    }
+
     /// True when `path` itself matches.
     public func matches(_ path: CanonicalPath, caseInsensitive: Bool) -> Bool {
         Self.match(components[...], path.components[...], caseInsensitive: caseInsensitive, prefixOnly: false)
@@ -97,9 +103,10 @@ public struct PathPattern: Hashable, Sendable, CustomStringConvertible {
         return body + (kind == .directory ? "(/.*)?$" : "$")
     }
 
-    /// One concrete path the pattern matches, for probing the sandbox.
+    /// One concrete path the pattern matches, for probing the sandbox. `**` stands for one directory,
+    /// so the sample always ends in a concrete name (`/a/**` would otherwise sample `/a/`).
     public var sample: String {
-        let parts = rest.filter { $0 != "**" }.map { $0.replacingOccurrences(of: "*", with: "x").replacingOccurrences(of: "?", with: "x") }
+        let parts = rest.map { $0 == "**" ? "x" : $0.replacingOccurrences(of: "*", with: "x").replacingOccurrences(of: "?", with: "x") }
         return (base.isRoot ? "" : base.value) + "/" + parts.joined(separator: "/")
     }
 

@@ -188,6 +188,9 @@ public final class HelperService {
     private var verified: [Int: Bool] = [:]
     private var verificationIssues: [Int: [String]] = [:]
     private var registeredAt: [Int: Date] = [:]
+    /// What each instance must look like, fixed when its rules were handed out: a later app update
+    /// that changes templates must not change what an already running process is checked against.
+    private var expectations: [Int: [SandboxExpectation]] = [:]
     private let probe: (any SandboxProbe)?
     /// How long a registered process may take to apply its sandbox before it counts as unprotected.
     public static let sandboxGracePeriod: TimeInterval = 15
@@ -236,6 +239,7 @@ public final class HelperService {
         verified.removeValue(forKey: id)
         verificationIssues.removeValue(forKey: id)
         registeredAt.removeValue(forKey: id)
+        expectations.removeValue(forKey: id)
         // Numbering restarts with the Helper; a new instance must never take a restored one's number.
         nextInstance = max(nextInstance, id + 1)
     }
@@ -247,16 +251,18 @@ public final class HelperService {
         let now = clock()
         for profileID in ids {
             for snapshot in tracker.instances(ofProfile: profileID) where snapshot.isRunning && verified[snapshot.id] == nil {
-                guard let profile = try? store.revision(profileID, snapshot.revision),
-                      let policy = try? compiler.compile(profile, catalog: catalog)
-                else {
+                // A restored instance's rules were handed out by an earlier Helper; recompiling its revision is the best evidence left.
+                if expectations[snapshot.id] == nil, let profile = try? store.revision(profileID, snapshot.revision),
+                   let policy = try? compiler.compile(profile, catalog: catalog) {
+                    expectations[snapshot.id] = SandboxVerification.expectations(for: policy, environment: environment)
+                }
+                guard let expected = expectations[snapshot.id] else {
                     fail(snapshot.id, ["无法读取或编译这个实例使用的修订 \(snapshot.revision)"])
                     continue
                 }
                 // Every process of an instance inherits the sandbox its root applied before exec.
                 guard let pid = (snapshot.entry ?? snapshot.liveProcesses.min())?.pid else { continue }
-                switch SandboxVerification.verify(pid: pid, expectations: SandboxVerification.expectations(for: policy, environment: environment),
-                                                  probe: probe) {
+                switch SandboxVerification.verify(pid: pid, expectations: expected, probe: probe) {
                 case .passed:
                     verified[snapshot.id] = true
                     verificationIssues.removeValue(forKey: snapshot.id)
@@ -456,13 +462,15 @@ public final class HelperService {
     private func register(profileID: String, revision: Int, process: ProcessKey, supervisedByLaunchd: Bool) throws -> HelperResponse {
         guard let latest = try store.latest(profileID) else { throw Failure(code: "unknown_profile") }
         guard latest.revision == revision else { throw Failure(code: "stale_revision") }
-        let sbpl = renderer.render(try compiler.compile(latest, catalog: catalog))
+        let policy = try compiler.compile(latest, catalog: catalog)
+        let sbpl = renderer.render(policy)
         let instance = nextInstance
         nextInstance += 1
         tracker.register(instance: instance, profileID: profileID, revision: revision, root: process, supervisedByLaunchd: supervisedByLaunchd)
         verified.removeValue(forKey: instance)
         verificationIssues.removeValue(forKey: instance)
         registeredAt[instance] = clock()
+        expectations[instance] = SandboxVerification.expectations(for: policy, environment: environment)
         return .registered(instance: instance, sbpl: sbpl)
     }
 
@@ -494,6 +502,7 @@ public final class HelperService {
             verified.removeValue(forKey: instance)
             verificationIssues.removeValue(forKey: instance)
             registeredAt.removeValue(forKey: instance)
+            expectations.removeValue(forKey: instance)
         }
         observations.removeValue(forKey: profileID)
         proposals = proposals.filter { $0.value.profile.id != profileID }

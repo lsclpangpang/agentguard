@@ -11,7 +11,7 @@ import Testing
     @Test func classifiesRules() {
         let a = analysis([
             #"(allow file-write* (subpath "/Users/me/docs"))"#,
-            #"(allow file-read-metadata (literal "/tmp/x"))"#,
+            #"(allow file-read-data (literal "/tmp/x"))"#,
             #"(allow file-write-data (regex #"^/Users/me/.*\.log$"))"#,
             #"(allow mach-lookup (global-name "com.apple.x"))"#,
             #"(allow file-read* (home-subpath "/x"))"#,

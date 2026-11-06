@@ -33,6 +33,8 @@ final class AppModel: ObservableObject {
     /// When the Helper last answered a status request. Older than `StatusFreshness.maxAge`, the
     /// report on screen may no longer describe the running programs.
     @Published var statusConfirmedAt: Date?
+    /// Ticks on its own so "状态待确认" appears even while a status request hangs.
+    @Published private(set) var clock = Date()
     private var pollTask: Task<Void, Never>?
     private var autoRefreshTask: Task<Void, Never>?
     /// One registration repair per launch; see `repairStaleRegistrationIfNeeded`.
@@ -84,6 +86,13 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self else { return }
                 _ = await self.refreshReport(timeout: 10, includePending: false)
+            }
+        }
+        Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self else { return }
+                self.clock = Date()
             }
         }
     }

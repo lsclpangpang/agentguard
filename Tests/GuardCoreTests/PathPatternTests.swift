@@ -139,3 +139,82 @@ import Testing
         #expect(merged == [F.ro("/Users/me/docs"), grant])
     }
 }
+
+@Suite struct ReviewFindingsTests {
+    typealias F = Fixtures
+    let resolver = AliasResolver.macOSDefault
+
+    func pattern(_ path: String, _ kind: PathKind = .directory, _ access: Access = .readOnly) -> FileGrant {
+        FileGrant(path: path, kind: kind, access: access, pattern: true)
+    }
+
+    @Test func patternsCannotOpenHomeOrRootAsAWhole() {
+        for raw in ["/Users/*", "/U*", "/Users/m?"] {
+            #expect(throws: CompileError.forbiddenPath(try! PathPattern(raw, resolver: resolver).value)) {
+                try F.compile(F.profile(files: [pattern(raw)]))
+            }
+        }
+        #expect(throws: CompileError.forbiddenPath("/Users/m?")) { try F.compile(F.profile(files: [pattern("/Users/m?", .file)])) }
+    }
+
+    @Test func trailingDoubleStarSampleIsAConcreteMatch() throws {
+        let p = try PathPattern("/Users/me/proj/**", resolver: resolver)
+        #expect(p.sample == "/Users/me/proj/x")
+        #expect(p.matches(try CanonicalPath(p.sample, resolver: resolver), caseInsensitive: true))
+    }
+
+    @Test func unlistedProbeAvoidsWhatPatternsGrant() throws {
+        let policy = try F.compile(F.profile(files: [pattern("/Users/me/.*", .file)]))
+        let probe = SandboxVerification.unlistedProbe(for: policy, environment: F.environment)
+        #expect(probe == "/Users/me/agentguard-unlisted/probe")
+    }
+
+    @Test func overlappingReadOnlyAndWritablePatternsAreRefused() {
+        #expect(throws: CompileError.nestedReadOnlyInsideReadWrite(inner: "/Users/me/w/a/secret", outer: "/Users/me/w/*")) {
+            try F.compile(F.profile(files: [pattern("/Users/me/w/*", .directory, .readWrite), F.roFile("/Users/me/w/a/secret")]))
+        }
+        #expect(throws: CompileError.nestedReadOnlyInsideReadWrite(inner: "/Users/me/code/*/README.md", outer: "/Users/me/code/app")) {
+            try F.compile(F.profile(files: [pattern("/Users/me/code/*/README.md", .file), F.rw("/Users/me/code/app")]))
+        }
+    }
+
+    @Test func ruleReachingElsewhereIsNotDroppedWithThePath() throws {
+        let rule = #"(allow file-write* (subpath "/Users/me/docs/a") (subpath "/Users/other"))"#
+        let result = try LegacyRevocation.revoke("/Users/me/docs", keeping: .readOnly, from: [rule], resolver: resolver, caseInsensitive: true)
+        #expect(result.removed.isEmpty)
+        #expect(result.stillGranting == [rule])
+    }
+
+    @Test func metadataRulesGrantNoAccess() throws {
+        let analysis = LegacyRuleAnalysis(rules: ["(allow file-read-metadata)", #"(allow file-ioctl (literal "/dev/x"))"#], resolver: resolver, caseInsensitive: true)
+        #expect(analysis.fileRules.isEmpty)
+        #expect(analysis.other.count == 2)
+        let result = try LegacyRevocation.revoke("/Users/me/docs", keeping: nil, from: ["(allow file-read-metadata)"], resolver: resolver, caseInsensitive: true)
+        #expect(result.stillGranting.isEmpty)
+    }
+
+    @Test func runningInstanceKeepsTheExpectationsItWasGiven() throws {
+        let probe = FakeProbe()
+        probe.sandboxed = false
+        let store = ProfileStore(root: "/store", files: InMemoryFileStore())
+        var counter = 0
+        let s = HelperService(store: store, environment: F.environment, catalog: TemplateCatalog([]), trust: F.trust,
+                              verifier: FakeVerifier(accept: true), settings: F.helperSettings, clock: { Date(timeIntervalSince1970: 1_800_000_000) },
+                              makeID: { counter += 1; return "c\(counter)" }, probe: probe)
+        let app = ProcessKey(pid: 10, version: 1)
+        func save(_ profile: Profile) {
+            guard case let .pending(info) = s.handle(.proposeChange(profile: profile), caller: F.appCaller, process: app) else { return }
+            _ = s.handle(.approveChange(changeID: info.id, digest: info.digest, authorization: Data("ok".utf8)), caller: F.appCaller, process: app)
+        }
+        save(F.profile(files: [F.rw("/Users/me/work")]))
+        _ = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.cliCaller, process: ProcessKey(pid: 20, version: 1))
+        _ = s.handle(.status, caller: F.appCaller, process: app)
+        // Saving revision 2 must not change what the running revision-1 process is checked against.
+        save(F.profile(files: [F.rw("/Users/me/work"), F.rw("/Users/me/more")], revision: 2))
+        probe.sandboxed = true
+        probe.writable = ["/Users/me/work"]
+        s.verifyInstances()
+        guard case let .status(report) = s.handle(.status, caller: F.appCaller, process: app) else { return }
+        #expect(report.profiles.first?.verificationIssues == [])
+    }
+}

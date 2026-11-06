@@ -121,10 +121,15 @@ private struct TrustNotices: View {
     var body: some View {
         let legacy = model.legacyAnalysis(profile)
         let issues = status?.verificationIssues ?? []
-        if !issues.isEmpty || legacy.hasUnverifiedFileRules {
+        if !issues.isEmpty || legacy.hasUnverifiedFileRules || !legacy.fileRules.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 if !issues.isEmpty {
                     Notice(kind: .error, text: "运行中的程序没有通过沙箱核对，下面的权限不代表它实际受到的限制：\n" + issues.joined(separator: "\n"))
+                }
+                // Legacy rules are not in the file list below, so every one that grants file access is listed here.
+                if !legacy.fileRules.isEmpty {
+                    Notice(kind: .info, text: "从旧安装迁移的规则还放行了以下文件访问（不在下面的列表中）：\n"
+                        + legacy.fileRules.map(\.rule).joined(separator: "\n"))
                 }
                 if legacy.hasUnverifiedFileRules {
                     Notice(kind: .warning, text: "存在 \(legacy.unverified.count) 条尚未核对的旧规则，它们可能放开下面没有列出的文件访问：\n"

@@ -64,11 +64,12 @@ public enum SandboxVerification {
         // Unprotected observation runs with `(allow default)`; only the built-in denials hold.
         guard !policy.mode.liftsBoundary else { return result }
 
-        let unlisted = environment.homeDirectory + "/" + unlistedName
-        result.append(SandboxExpectation(operation: .fileRead, target: unlisted, allowed: false,
-                                         failure: "未授权的位置 \(unlisted) 可以读取：默认拒绝没有生效，或有旧规则放开了它"))
-        result.append(SandboxExpectation(operation: .fileWrite, target: unlisted, allowed: false,
-                                         failure: "未授权的位置 \(unlisted) 可以写入：默认拒绝没有生效，或有旧规则放开了它"))
+        if let unlisted = unlistedProbe(for: policy, environment: environment) {
+            result.append(SandboxExpectation(operation: .fileRead, target: unlisted, allowed: false,
+                                             failure: "未授权的位置 \(unlisted) 可以读取：默认拒绝没有生效，或有旧规则放开了它"))
+            result.append(SandboxExpectation(operation: .fileWrite, target: unlisted, allowed: false,
+                                             failure: "未授权的位置 \(unlisted) 可以写入：默认拒绝没有生效，或有旧规则放开了它"))
+        }
         for grant in policy.files {
             let target = grant.kind == .directory ? child(of: grant.path) : grant.path
             result.append(SandboxExpectation(operation: .fileRead, target: target, allowed: true,
@@ -106,6 +107,25 @@ public enum SandboxVerification {
             }
         }
         return failures.isEmpty ? .passed : .failed(failures)
+    }
+
+    /// The first candidate no grant covers; a pattern such as `~/.*` legitimately covers the first.
+    static func unlistedProbe(for policy: EffectivePolicy, environment: CompileEnvironment) -> String? {
+        let identity = AliasResolver(aliases: [:])
+        let files = policy.files.compactMap { g in (try? CanonicalPath(g.path, resolver: identity)).map { (g, $0) } }
+        let patterns = policy.patterns.compactMap { g in (try? PathPattern(g.pattern, resolver: identity)).map { (g, $0) } }
+        let candidates = [environment.homeDirectory + "/" + unlistedName,
+                          environment.homeDirectory + "/agentguard-unlisted/probe",
+                          "/private/var/empty/" + unlistedName]
+        return candidates.first { candidate in
+            guard let path = try? CanonicalPath(candidate, resolver: identity) else { return false }
+            let byFile = files.contains { grant, granted in
+                grant.kind == .directory ? granted.contains(path, caseInsensitive: environment.caseInsensitive)
+                    : granted.isSame(as: path, caseInsensitive: environment.caseInsensitive)
+            }
+            let byPattern = patterns.contains { grant, pattern in pattern.covers(path, kind: grant.kind, caseInsensitive: environment.caseInsensitive) }
+            return !byFile && !byPattern
+        }
     }
 
     private static func child(of path: String) -> String {
