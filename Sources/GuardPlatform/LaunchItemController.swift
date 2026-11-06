@@ -258,6 +258,108 @@ public struct LaunchItemController {
         return snapshot.warnings
     }
 
+    /// Stops the profile's managed jobs for this login: they are unloaded so launchd does not start
+    /// them again, but their files stay, so the next login follows the saved setting.
+    @discardableResult
+    public func stop(profileID: String, stop: () throws -> Void) throws -> [String] {
+        let snapshot = try snapshot(profileID, tolerateFileProblems: true)
+        try unload(snapshot.saved)
+        var warnings = snapshot.warnings
+        for orphan in snapshot.orphans {
+            let job = execute(["print", domain + "/" + orphan])
+            guard LaunchctlClient.isManagedJob(job, launcherPath: files.launcherPath, profileID: profileID) else {
+                warnings.append("遗留任务无法确认归属，没有停止：" + orphan); continue
+            }
+            if execute(["bootout", domain + "/" + orphan]).status != 0 { warnings.append("遗留启动任务未能停止：" + orphan) }
+        }
+        try stop()
+        return warnings
+    }
+
+    /// Moves the managed launch item between the login directory and AgentGuard's own directory to
+    /// match `runAtLogin`, leaving a loaded job running: only the next login reads the location.
+    /// Returns false when there is nothing to move.
+    @discardableResult
+    public func relocate(profileID: String, runAtLogin: Bool) throws -> Bool {
+        let snapshot = try snapshot(profileID)
+        let target = runAtLogin ? files.automaticDirectory : files.manualDirectory
+        var moved = false
+        for saved in snapshot.saved {
+            let url = URL(fileURLWithPath: saved.item.path)
+            guard url.deletingLastPathComponent().path != target else { continue }
+            let destination = target + "/" + url.lastPathComponent
+            if FileManager.default.fileExists(atPath: destination) { throw LaunchItemError.destinationExists }
+            try writeNew(saved.data, path: destination, metadata: saved.metadata)
+            do { try FileManager.default.removeItem(atPath: saved.item.path) } catch {
+                try? FileManager.default.removeItem(atPath: destination)
+                throw error
+            }
+            moved = true
+        }
+        return moved
+    }
+
+    /// Where launch items disabled because they start a managed program outside AgentGuard are kept.
+    public var disabledDirectory: String { files.backupDirectory + "/disabled" }
+
+    /// Backs up another launch item, unloads it and removes it from its directory, so it no longer
+    /// starts the program outside AgentGuard. The backup lets `restoreDisabled` put it back exactly.
+    public func disable(label: String, path: String) throws {
+        let item = try files.original(label: label, selectedPath: path)
+        let state = try registration(label)
+        let saved = Saved(item: item, data: try Data(contentsOf: URL(fileURLWithPath: item.path)), metadata: try Metadata(path: item.path),
+                          loaded: state.loaded, running: state.running)
+        let base = disabledDirectory + "/" + label + ".plist"
+        if FileManager.default.fileExists(atPath: base) { throw LaunchItemError.destinationExists }
+        let privateMetadata = Metadata(mode: 0o600, uid: fileOwner ?? Int(getuid()), gid: fileOwner == nil ? Int(getgid()) : 0)
+        // The location is not secret; the App lists it so the user can see what was disabled.
+        let publicMetadata = Metadata(mode: 0o644, uid: privateMetadata.uid, gid: privateMetadata.gid)
+        var created: [String] = []
+        do {
+            for (file, data, metadata) in [(base, saved.data, privateMetadata), (base + ".metadata", try JSONEncoder().encode(saved.metadata), privateMetadata),
+                                           (base + ".location", Data(item.path.utf8), publicMetadata)] {
+                try writeNew(data, path: file, metadata: metadata)
+                created.append(file)
+            }
+            try unload([saved])
+            try FileManager.default.removeItem(atPath: item.path)
+        } catch {
+            let failure = error
+            if !FileManager.default.fileExists(atPath: item.path) { try? writeNew(saved.data, path: item.path, metadata: saved.metadata) }
+            if saved.loaded, (try? registration(label).loaded) == false { _ = execute(["bootstrap", domain, item.path]) }
+            for file in created { try? FileManager.default.removeItem(atPath: file) }
+            throw failure
+        }
+    }
+
+    /// Labels of launch items disabled by `disable`, with the location each came from.
+    public func disabledItems() -> [(label: String, location: String)] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: disabledDirectory)) ?? []
+        return names.filter { $0.hasSuffix(".plist") }.sorted().compactMap { name in
+            let location = try? String(contentsOfFile: disabledDirectory + "/" + name + ".location", encoding: .utf8)
+            return location.map { (String(name.dropLast(6)), $0) }
+        }
+    }
+
+    /// Puts a disabled launch item back where it was and loads it; it then runs outside AgentGuard.
+    public func restoreDisabled(label: String) throws {
+        guard !label.isEmpty, label.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || "._-".unicodeScalars.contains($0) }),
+              !label.hasPrefix(".") else { throw LaunchItemError.invalidBackup }
+        let base = disabledDirectory + "/" + label + ".plist"
+        guard let data = FileManager.default.contents(atPath: base), let item = LaunchItem(path: base, data: data), item.label == label,
+              let destination = try? String(contentsOfFile: base + ".location", encoding: .utf8), files.isOriginalLocation(destination),
+              let metadataData = FileManager.default.contents(atPath: base + ".metadata"),
+              let metadata = try? JSONDecoder().decode(Metadata.self, from: metadataData) else { throw LaunchItemError.invalidBackup }
+        if FileManager.default.fileExists(atPath: destination) { throw LaunchItemError.destinationExists }
+        guard !(try registration(label).loaded) else { throw LaunchItemError.destinationExists }
+        try writeNew(data, path: destination, metadata: metadata)
+        guard execute(["bootstrap", domain, destination]).status == 0 else {
+            try? FileManager.default.removeItem(atPath: destination)
+            throw LaunchItemError.operationFailed
+        }
+        for suffix in ["", ".location", ".metadata"] { try? FileManager.default.removeItem(atPath: base + suffix) }
+    }
+
     @discardableResult
     public func remove(profileID: String, restoreOriginal label: String?, hasLaunchSettings: Bool = true, deleting: Bool = false,
                        stop: () throws -> Void, commit: () throws -> Void = {}) throws -> [String] {

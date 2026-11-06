@@ -19,6 +19,8 @@ final class HelperCore {
     private var processBirths: [ProcessKey: UInt64] = [:]
     private var launchStatusMonitor: LaunchStatusMonitor?
     private var operationWarnings: [String] = []
+    /// What the current request's stop achieved; reported instead of a bare success.
+    private var operationStop: StopOutcome?
 
     init(bundleMacOSDirectory: String) {
         self.bundleMacOSDirectory = bundleMacOSDirectory
@@ -111,9 +113,11 @@ final class HelperCore {
         if let request = try? HelperWire.decodeRequest(data) {
             claimOwnershipIfNeeded(identity)
             operationWarnings = []
+            operationStop = nil
             defer {
                 switch request {
-                case .approveChange, .applyTightening, .installLaunchAgent, .restartManagedInstance, .removeManagement, .deleteProfile:
+                case .approveChange, .applyTightening, .installLaunchAgent, .restartManagedInstance, .removeManagement, .deleteProfile,
+                     .stopManaged, .applyLoginSetting, .disableLaunchItem, .restoreLaunchItem, .uninstall:
                     refreshLaunchStatus(invalidate: true)
                 default: break
                 }
@@ -168,7 +172,8 @@ final class HelperCore {
             clock: Date.init, makeID: { UUID().uuidString.lowercased() },
             launcherGeneration: (try? CodeSigning.cdhash(atPath: config.helperSettings.launcherPath)).map { String($0.prefix(8)) } ?? "",
             managedLogDirectory: record.home + "/Library/Logs/AgentGuard",
-            probe: SystemSandboxProbe()
+            probe: SystemSandboxProbe(),
+            activity: ActivityStore(root: config.configRoot, files: LocalFileStore())
         )
         service?.onAcknowledgeCollectorProblems = { [weak self] in
             guard let self else { return }
@@ -181,8 +186,8 @@ final class HelperCore {
             let hasLaunch = (try config.store.latest(id))?.launch != nil
             let warnings = try self.launchController(config: config, owner: record).remove(profileID: id, restoreOriginal: originalLabel,
                                                                                           hasLaunchSettings: hasLaunch, deleting: true,
-                                                                                          stop: { self.stopTargets(plan.targets) }, commit: archive)
-            self.operationWarnings += plan.warnings + warnings
+                                                                                          stop: { self.stop(plan, profileID: id) }, commit: archive)
+            self.operationWarnings += warnings
         }
         if started { refreshCollector() }
         reconcileInstances()
@@ -228,6 +233,11 @@ final class HelperCore {
             service.restoreInstance(id: record.instance, profileID: record.profileID, revision: record.revision, root: root,
                                     supervisedByLaunchd: record.supervisedByLaunchd)
             processBirths[root] = record.startTime
+        }
+        // A restored instance's forks were never observed; find the ones still running by parent PID
+        // so a stop reaches them. Daemons that were reparented stay unknown, which the status says.
+        for (key, birth) in service.adoptDescendants(of: ProcessFacts.allProcesses(), birth: ProcessFacts.startTime) {
+            processBirths[key] = birth
         }
     }
 
@@ -276,10 +286,59 @@ final class HelperCore {
             } catch {
                 return .failure(code: "startup_error:" + String(describing: error))
             }
+        case let .stopManaged(profileID):
+            let plan = validatedTargets(profileID)
+            do {
+                operationWarnings += try launchController(config: config, owner: owner).stop(profileID: profileID) { self.stop(plan, profileID: profileID) }
+            } catch {
+                return .failure(code: "startup_error:" + String(describing: error))
+            }
+        case let .relocateLaunchAgent(profileID, runAtLogin):
+            do {
+                let moved = try launchController(config: config, owner: owner).relocate(profileID: profileID, runAtLogin: runAtLogin)
+                if !moved { operationWarnings.append(runAtLogin ? "还没有启用受控启动，登录自启会在下次启动程序时生效" : "没有需要调整的登录启动项") }
+            } catch {
+                return .failure(code: "startup_error:" + String(describing: error))
+            }
+        case let .disableLaunchItem(label, path):
+            do { try launchController(config: config, owner: owner).disable(label: label, path: path) }
+            catch { return .failure(code: "startup_error:" + String(describing: error)) }
+        case let .restoreLaunchItem(label):
+            do { try launchController(config: config, owner: owner).restoreDisabled(label: label) }
+            catch { return .failure(code: "startup_error:" + String(describing: error)) }
+        case let .uninstall(targets):
+            uninstall(targets, restoreDisabled: { if case let .uninstall(restore, _) = request { return restore } else { return false } }(),
+                      config: config, owner: owner)
         default:
             break
         }
+        if let stop = operationStop { return .report(OperationReport(stop: stop, warnings: operationWarnings)) }
         return operationWarnings.isEmpty ? response : .completed(warnings: operationWarnings)
+    }
+
+    /// Removes every profile's launch items and stops its programs, then the collector. Each profile
+    /// is handled on its own, so one failure does not leave the rest half removed; what failed is reported.
+    private func uninstall(_ targets: [UninstallTarget], restoreDisabled: Bool, config: AgentGuardConfig, owner: OwnerRecord) {
+        let controller = launchController(config: config, owner: owner)
+        for target in targets {
+            let plan = validatedTargets(target.profileID)
+            do {
+                operationWarnings += try controller.remove(profileID: target.profileID, restoreOriginal: target.restoreOriginalLabel,
+                                                           hasLaunchSettings: target.hasLaunchSettings) { self.stop(plan, profileID: target.profileID) }
+            } catch {
+                operationWarnings.append("\(target.profileID)：未能移除启动项（\(error)），请在重新安装后处理")
+            }
+        }
+        if restoreDisabled {
+            for item in controller.disabledItems() {
+                do { try controller.restoreDisabled(label: item.label) }
+                catch { operationWarnings.append("未能恢复被停用的启动项 \(item.label)（\(error)），备份保留在 \(controller.disabledDirectory)") }
+            }
+        } else if !controller.disabledItems().isEmpty {
+            operationWarnings.append("被停用的其他启动项没有恢复，备份保留在 \(controller.disabledDirectory)")
+        }
+        operationWarnings += CollectorInstaller.uninstall()
+        if operationStop == nil { operationStop = StopOutcome() }
     }
 
     private func prepareStateDirectory(_ profileID: String, config: AgentGuardConfig, owner: OwnerRecord) {
@@ -308,12 +367,26 @@ final class HelperCore {
         monitor.refresh(requests, invalidate: invalidate)
     }
 
-    private func stopTargets(_ targets: [Int32: UInt64]) {
+    /// Stops the identity-checked targets and records what actually exited, merged into this
+    /// request's outcome (an uninstall stops several profiles).
+    private func stop(_ plan: ProcessStopPlan, profileID: String) {
+        let targets = plan.targets
         func stillSame(_ pid: Int32) -> Bool { ProcessFacts.startTime(pid: pid) == targets[pid] }
         for pid in targets.keys where stillSame(pid) { kill(pid, SIGTERM) }
-        let deadline = Date().addingTimeInterval(3)
+        var deadline = Date().addingTimeInterval(3)
         while Date() < deadline, targets.keys.contains(where: stillSame) { usleep(100_000) }
-        for pid in targets.keys where stillSame(pid) { kill(pid, SIGKILL) }
+        let lingering = targets.keys.filter(stillSame)
+        for pid in lingering { kill(pid, SIGKILL) }
+        deadline = Date().addingTimeInterval(1)
+        while Date() < deadline, lingering.contains(where: stillSame) { usleep(50_000) }
+        let survivors = lingering.filter(stillSame)
+        var outcome = operationStop ?? StopOutcome()
+        outcome.stopped += targets.keys.filter { !lingering.contains($0) }
+        outcome.forced += lingering.filter { !survivors.contains($0) }
+        outcome.survivors += survivors
+        outcome.skipped += plan.skipped
+        outcome.untrackedInstances += service?.instances(ofProfile: profileID).filter(\.trackingIncomplete).map(\.id) ?? []
+        operationStop = outcome
     }
 
     private func validatedTargets(_ id: String) -> ProcessStopPlan {
@@ -326,17 +399,17 @@ final class HelperCore {
         guard let launch = try config.store.latest(profileID)?.launch else { throw LaunchItemError.operationFailed }
         let plan = validatedTargets(profileID)
         let warnings = try launchController(config: config, owner: owner).install(profileID: profileID, launch: launch, label: label, plist: plist, restart: restart) {
-            self.stopTargets(plan.targets)
+            self.stop(plan, profileID: profileID)
         }
-        operationWarnings += plan.warnings + warnings
+        operationWarnings += warnings
     }
 
     private func removeLaunchAgent(label: String, profileID: String, restore originalLabel: String?, config: AgentGuardConfig, owner: OwnerRecord) throws {
         let plan = validatedTargets(profileID)
         let warnings = try launchController(config: config, owner: owner).remove(profileID: profileID, restoreOriginal: originalLabel, stop: {
-            self.stopTargets(plan.targets)
+            self.stop(plan, profileID: profileID)
         })
-        operationWarnings += plan.warnings + warnings
+        operationWarnings += warnings
     }
 
     /// File events are only collected while some profile is learning; lifecycle events always.
