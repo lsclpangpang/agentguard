@@ -2,39 +2,55 @@
 import GuardCore
 import SwiftUI
 
+enum DetailTab: String, CaseIterable, Identifiable {
+    case overview = "概况"
+    case permissions = "权限"
+    case activity = "最近活动"
+    case advanced = "高级"
+
+    var id: String { rawValue }
+}
+
 struct ProfileDetailView: View {
     @EnvironmentObject var model: AppModel
     let profileID: String
+    @State private var tab: DetailTab = .overview
 
     var body: some View {
         if let profile = model.profile(profileID) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        ProfileHeader(profile: profile, status: model.status(for: profileID))
-                        HStack(spacing: 12) {
-                            Text("保护模式").font(.callout.weight(.medium))
-                            Picker("保护模式", selection: Binding(get: { profile.mode }, set: { mode in model.edit(profileID) { $0.mode = mode } })) {
-                                Text(Mode.restrictedLearning.displayName).tag(Mode.restrictedLearning)
-                                Text(Mode.enforce.displayName).tag(Mode.enforce)
+                    ProfileHeader(profile: profile, status: model.status(for: profileID))
+                    Picker("", selection: $tab) {
+                        ForEach(DetailTab.allCases) { tab in
+                            if tab == .activity, let count = model.status(for: profileID)?.pendingCount, count > 0 {
+                                Text("\(tab.rawValue)（\(count)）").tag(tab)
+                            } else {
+                                Text(tab.rawValue).tag(tab)
                             }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .frame(maxWidth: 260)
-                            .help("受限学习：未允许的访问被拒绝并记为待定项。强制保护：只放行已允许的访问。")
-                            Spacer(minLength: 0)
                         }
                     }
-                    .padding(.bottom, 4)
-
-                    TrustNotices(profile: profile, status: model.status(for: profileID))
-                    PendingCard(profileID: profileID, items: model.pending[profileID] ?? [])
-                    ManagedProgramsCard(profile: profile, unmanaged: model.status(for: profileID)?.unmanagedProcesses ?? [])
-                    FilesCard(profile: profile)
-                    TemplatesCard(profile: profile)
-                    ProgramsAndNetworkCard(profile: profile)
-                    LaunchCard(profile: profile)
-                    DeleteCard(profile: profile, running: !(model.status(for: profileID)?.runningInstances.isEmpty ?? true))
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 420)
+                    switch tab {
+                    case .overview:
+                        StatusCard(profile: profile, status: model.status(for: profileID)) { tab = $0 }
+                        TrustNotices(profile: profile, status: model.status(for: profileID))
+                        LaunchCard(profile: profile)
+                        ManagedProgramsCard(profile: profile, unmanaged: model.status(for: profileID)?.unmanagedProcesses ?? [])
+                    case .permissions:
+                        EffectivePermissionsCard(profile: profile)
+                        FilesCard(profile: profile)
+                        TemplatesCard(profile: profile)
+                        ProgramsAndNetworkCard(profile: profile)
+                        RecordMoreCard(profile: profile)
+                    case .activity:
+                        ActivityTab(profileID: profileID)
+                    case .advanced:
+                        AdvancedCard(profile: profile, status: model.status(for: profileID))
+                        DeleteCard(profile: profile, running: !(model.status(for: profileID)?.runningInstances.isEmpty ?? true))
+                    }
                 }
                 .padding(20)
                 .frame(maxWidth: 900, alignment: .leading)
@@ -53,60 +69,92 @@ private struct ProfileHeader: View {
     let status: ProfileStatusReport?
     @State private var copied = false
 
-    private var command: String { "guard run \(profile.id) -- <命令>" }
-
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
-            IconTile(systemImage: profile.mode.symbol, tint: profile.mode.tint, size: 40)
+            IconTile(systemImage: "app.badge.checkmark", tint: tint, size: 40)
             VStack(alignment: .leading, spacing: 8) {
                 Text(profile.id).font(.title2.weight(.semibold)).lineLimit(2)
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 6) { statusChips }
-                    VStack(alignment: .leading, spacing: 6) { statusChips }
-                }
-                Text(profile.mode.explanation).font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 8) {
-                    Text(command).font(.system(.callout, design: .monospaced))
-                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                    Button {
-                        Pasteboard.copy("guard run \(profile.id) -- ")
-                        copied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-                    } label: {
-                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                HStack(spacing: 6) {
+                    if model.restartingProfiles.contains(profile.id) {
+                        ProgressView().controlSize(.small)
+                        Text("正在启动…").font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        Chip(text: summary.headline, tint: tint)
                     }
-                    .buttonStyle(.borderless)
-                    .help("复制启动命令")
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+                if let command = model.command(for: profile) {
+                    HStack(spacing: 8) {
+                        Text(command).font(.system(.callout, design: .monospaced))
+                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                        Button {
+                            Pasteboard.copy(command)
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                        } label: {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("复制命令：在终端中粘贴即可在这份权限下运行")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+                } else if profile.launch == nil {
+                    Text("在“受管程序”中指定程序后，这里会给出可以直接复制运行的完整命令。")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             }
             Spacer(minLength: 0)
         }
     }
 
-    @ViewBuilder private var statusChips: some View {
-        Chip(text: profile.mode.displayName, systemImage: profile.mode.symbol, tint: profile.mode.tint)
-        if model.restartingProfiles.contains(profile.id) {
-            // 状态从“已停止/待生效”跳到“运行”中间有几秒，这里给出明确的过渡提示。
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("正在启动…").font(.callout).foregroundStyle(.secondary)
+    private var summary: ProgramStatusSummary {
+        ProgramStatusSummary.evaluate(status, freshness: model.freshness, programName: profile.id, hasLaunch: profile.launch != nil)
+    }
+
+    private var tint: Color { Theme.color(summary.level) }
+}
+
+/// What is happening, what it means and what to do, with the one action that resolves it.
+private struct StatusCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+    let status: ProfileStatusReport?
+    let showTab: (DetailTab) -> Void
+
+    var body: some View {
+        let summary = ProgramStatusSummary.evaluate(status, freshness: model.freshness, programName: profile.id, hasLaunch: profile.launch != nil)
+        Card(title: summary.headline, systemImage: Theme.symbol(summary.level)) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(summary.impact).font(.callout).fixedSize(horizontal: false, vertical: true)
+                if let confirmed = model.statusConfirmedAt {
+                    Text("最近确认：\(confirmed.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 10) {
+                    if let next = summary.next { action(next) }
+                    if let pending = status?.pendingCount, pending > 0 {
+                        Button("查看 \(pending) 项需要处理的活动") { showTab(.activity) }
+                    }
+                }
+                .disabled(!model.helperReachable || model.restartingProfiles.contains(profile.id))
             }
-        } else if let status {
-            Chip(text: model.revisionLabel(status).text, tint: model.revisionLabel(status).tint)
-            Chip(text: "修订 \(status.savedRevision)")
-            if !status.runningInstances.isEmpty {
-                Chip(text: "\(status.runningInstances.count) 个运行实例", systemImage: "bolt.fill", tint: .green)
+        }
+    }
+
+    @ViewBuilder private func action(_ next: ProgramStatusSummary.Next) -> some View {
+        switch next {
+        case .start:
+            Button(next.title) { model.installLaunchAgent(profile.id) }.buttonStyle(.borderedProminent)
+        case .restartAndApply, .restart:
+            if profile.launch != nil {
+                Button(next.title) { model.restartManaged(profile.id) }.buttonStyle(.borderedProminent)
+            } else {
+                Text("在终端里结束正在运行的 \(profile.id)，再用上面的命令重新运行。").font(.callout).foregroundStyle(.secondary)
             }
-            if !status.detachedInstances.isEmpty {
-                Chip(text: "已脱离 launchd 看护", systemImage: "exclamationmark.triangle.fill", tint: .orange)
-            }
-            if !status.unmanagedProcesses.isEmpty {
-                Chip(text: "\(status.unmanagedProcesses.count) 个未受管进程", systemImage: "exclamationmark.octagon.fill", tint: .red)
-            }
+        case .checkAndRecover:
+            Button(next.title) { model.refresh() }
+        case .stopUnmanaged:
+            Text("在下方“受管程序”中查看这些副本。").font(.callout).foregroundStyle(.secondary)
         }
     }
 }
@@ -121,63 +169,158 @@ private struct TrustNotices: View {
     var body: some View {
         let legacy = model.legacyAnalysis(profile)
         let issues = status?.verificationIssues ?? []
-        if !issues.isEmpty || legacy.hasUnverifiedFileRules || !legacy.fileRules.isEmpty {
+        if !issues.isEmpty || legacy.hasUnverifiedFileRules || !(status?.untrackedInstances.isEmpty ?? true) {
             VStack(alignment: .leading, spacing: 8) {
                 if !issues.isEmpty {
-                    Notice(kind: .error, text: "运行中的程序没有通过沙箱核对，下面的权限不代表它实际受到的限制：\n" + issues.joined(separator: "\n"))
+                    Notice(kind: .error, text: "运行中的程序没有通过保护确认，权限页列出的不代表它实际受到的限制：\n" + issues.joined(separator: "\n"))
                 }
-                // Legacy rules are not in the file list below, so every one that grants file access is listed here.
-                if !legacy.fileRules.isEmpty {
-                    Notice(kind: .info, text: "从旧安装迁移的规则还放行了以下文件访问（不在下面的列表中）：\n"
-                        + legacy.fileRules.map(\.rule).joined(separator: "\n"))
+                if let untracked = status?.untrackedInstances, !untracked.isEmpty {
+                    Notice(kind: .warning, text: "暂时无法确认所有运行副本的保护状态：副本 #\(untracked.map(String.init).joined(separator: "、#")) 在 Helper 重启或活动记录中断前启动的子程序可能没有被跟踪。重启程序后恢复完整跟踪。")
                 }
                 if legacy.hasUnverifiedFileRules {
-                    Notice(kind: .warning, text: "存在 \(legacy.unverified.count) 条尚未核对的旧规则，它们可能放开下面没有列出的文件访问：\n"
-                        + legacy.unverified.joined(separator: "\n"))
+                    Notice(kind: .warning, text: "存在 \(legacy.unverified.count) 条尚未核对的旧规则，它们可能放开权限页没有列出的访问。详见“高级”。")
                 }
             }
         }
     }
 }
 
-private struct PendingCard: View {
+/// Everything the program can access, merged from all sources, with where each grant comes from.
+private struct EffectivePermissionsCard: View {
     @EnvironmentObject var model: AppModel
-    let profileID: String
-    let items: [PendingItem]
+    let profile: Profile
+    @State private var expanded = false
 
     var body: some View {
-        if !items.isEmpty {
-            let ordinary = items.filter { !$0.sensitive }
-            Card(title: "待定项", systemImage: "tray.full.fill",
-                 subtitle: "受管程序尝试过、但当前未允许的访问。这里只列出已观测到的行为，不代表全部。") {
-                if ordinary.count > 1 {
-                    Button("允许全部非敏感项（\(ordinary.count)）") { model.acceptAll(ordinary, for: profileID) }
-                        .controlSize(.small)
+        let overview = model.overview(profile)
+        Card(title: "实际权限", systemImage: "checklist",
+             subtitle: overview.complete ? "下面合并了你添加的授权、推荐权限组、程序启动所需和迁移来的旧规则，是这个程序实际可以访问的全部位置。"
+                                         : "存在无法核对的旧规则，下面的列表可能不完整。") {
+            Button(expanded ? "收起" : "展开全部（\(overview.files.count)）") { expanded.toggle() }.buttonStyle(.borderless)
+        } content: {
+            VStack(alignment: .leading, spacing: 6) {
+                if !overview.complete {
+                    Notice(kind: .warning, text: "以下旧规则无法核对，它们可能放开没有列出的访问：\n" + overview.unverifiedLegacy.joined(separator: "\n"))
                 }
-            } content: {
-                VStack(spacing: 2) {
-                    ForEach(items, id: \.self) { item in
-                        HStack(spacing: 10) {
-                            IconTile(systemImage: item.suggestion.symbol, tint: item.sensitive ? .red : .accentColor)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.suggestion.title).lineLimit(2).truncationMode(.middle)
-                                HStack(spacing: 6) {
-                                    Text("\(item.evidence) 次").font(.caption).foregroundStyle(.secondary)
-                                    if item.sensitive { Chip(text: "敏感位置", systemImage: "exclamationmark.triangle.fill", tint: .red) }
-                                }
-                            }
-                            Spacer(minLength: 8)
-                            Button("允许") { model.acceptAll([item], for: profileID) }
-                                .controlSize(.small)
+                let shown = expanded ? overview.files : Array(overview.files.filter { !$0.redundant }.prefix(8))
+                ForEach(shown, id: \.self) { entry in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: entry.access == .readWrite ? "pencil.circle.fill" : "eye.circle.fill")
+                            .foregroundStyle(entry.access == .readWrite ? Color.orange : Color.blue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(PathLabel.abbreviate(entry.path)).font(.system(.callout, design: .monospaced)).lineLimit(2).truncationMode(.middle)
+                                .textSelection(.enabled)
+                            Text(describe(entry)).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 8)
-                        .help(item.samples.joined(separator: "\n"))
+                        Spacer(minLength: 4)
+                        if entry.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
+                        Text(entry.access == .readWrite ? "可修改" : "仅查看").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if !expanded && overview.files.count > shown.count {
+                    Text("还有 \(overview.files.count - shown.count) 项（包括已被上层目录覆盖的）").font(.caption).foregroundStyle(.secondary)
+                }
+                Divider().padding(.vertical, 4)
+                Text(networkLine(overview)).font(.callout)
+                Text(execLine(overview)).font(.callout).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func describe(_ entry: PermissionEntry) -> String {
+        var parts = entry.sources.map { source -> String in
+            "\(source.source.displayName)\(entry.sources.count > 1 ? (source.access == .readWrite ? "（读写）" : "（只读）") : "")"
+        }
+        if let wider = entry.inherited.first(where: { $0.access > entry.ownAccess }) {
+            parts.append("但上层的 \(PathLabel.abbreviate(wider.path))（\(wider.source.displayName)）允许修改")
+        } else if entry.redundant, let parent = entry.inherited.first {
+            parts.append("已被 \(PathLabel.abbreviate(parent.path)) 覆盖")
+        }
+        return "来源：" + parts.joined(separator: "、")
+    }
+
+    private func networkLine(_ overview: PermissionOverview) -> String {
+        var parts: [String] = [overview.network.outboundTCP == .allowed ? "可以联网（对外 TCP）" : "不能联网"]
+        if !overview.ports.isEmpty { parts.append("可连接本机端口 " + overview.ports.map { String($0.port) }.joined(separator: "、")) }
+        if overview.network.listen == .allowed { parts.append("可以接收连接") }
+        if overview.network.udp == .allowed { parts.append("可以使用 UDP") }
+        return "网络：" + parts.joined(separator: "；")
+    }
+
+    private func execLine(_ overview: PermissionOverview) -> String {
+        if overview.unrestrictedExec { return "运行其他程序：任意程序（从旧安装迁移时保留）" }
+        guard !overview.exec.isEmpty else { return "运行其他程序：不允许" }
+        return "运行其他程序：" + overview.exec.map { PathLabel.abbreviate($0.path) }.joined(separator: "、")
+    }
+}
+
+/// Optional extra activity collection; it never loosens what is blocked.
+private struct RecordMoreCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+
+    var body: some View {
+        Card(title: "记录更多活动", systemImage: "waveform.path.ecg") {
+            SwiftUI.Toggle(isOn: Binding(get: { profile.mode == .restrictedLearning }, set: { model.setRecordsMoreActivity($0, in: profile.id) })) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("记录程序成功完成的文件访问，帮助完善权限")
+                    Text("未允许的访问仍会被阻止。开启后会记录这个程序的文件打开、创建和删除，只用于本机的权限建议；关闭后停止记录。根据这些记录给出的建议不代表程序的全部需求。")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(profile.mode == .unprotectedObserve || !model.helperReachable)
+        }
+    }
+}
+
+/// Diagnostic details kept off the main screens: revision numbers, raw legacy rules, launch labels.
+private struct AdvancedCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+    let status: ProfileStatusReport?
+
+    var body: some View {
+        let legacy = model.legacyAnalysis(profile)
+        Card(title: "诊断信息", systemImage: "stethoscope") {
+            VStack(alignment: .leading, spacing: 6) {
+                row("已保存的修订", status.map { String($0.savedRevision) } ?? String(profile.revision))
+                row("运行状态", status?.revisionState.displayText ?? "未知")
+                row("运行副本", (status?.runningInstances ?? []).map { "#\($0)" }.joined(separator: "、").ifEmpty("无"))
+                row("保护模式", profile.mode.displayName)
+                if let launch = profile.launch {
+                    row("启动入口", launch.executable)
+                    row("原启动项", launch.originalLabel ?? "无")
+                }
+                if !profile.extraRules.isEmpty {
+                    Divider()
+                    Text("从旧安装迁移的规则（\(profile.extraRules.count) 条）").font(.subheadline.weight(.medium))
+                    ForEach(legacy.fileRules, id: \.rule) { rule in
+                        Text(rule.rule).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                    ForEach(legacy.unverified, id: \.self) { rule in
+                        Label(rule, systemImage: "exclamationmark.triangle.fill").font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.orange).textSelection(.enabled)
+                    }
+                    ForEach(legacy.other, id: \.self) { rule in
+                        Text(rule).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                 }
             }
         }
     }
+
+    private func row(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
+            Text(value).textSelection(.enabled)
+        }
+        .font(.callout)
+    }
+}
+
+extension String {
+    func ifEmpty(_ replacement: String) -> String { isEmpty ? replacement : self }
 }
 
 private struct FilesCard: View {
@@ -194,8 +337,8 @@ private struct FilesCard: View {
     let profile: Profile
 
     var body: some View {
-        Card(title: "文件访问", systemImage: "folder.fill",
-             subtitle: "沙箱只放行这里列出的目录和文件；系统库由“系统基础”模板提供。") {
+        Card(title: "你添加的文件访问", systemImage: "folder.fill",
+             subtitle: "程序只能访问这里和上方“实际权限”列出的位置。移除或改为仅查看时，会一并处理只在它之内的授权，并说明仍保留访问的其他来源。") {
             Menu {
                 Button("只读…") { model.addFolder(to: profile.id, access: .readOnly) }
                 Button("读写…") { model.addFolder(to: profile.id, access: .readWrite) }
@@ -277,8 +420,8 @@ private struct TemplatesCard: View {
     let profile: Profile
 
     var body: some View {
-        Card(title: "运行时模板", systemImage: "square.stack.3d.up.fill",
-             subtitle: "常见工具运行所需的一组权限，可整体开关。") {
+        Card(title: "推荐权限组", systemImage: "square.stack.3d.up.fill",
+             subtitle: "常见工具运行所需的一组权限，整体开关。每组实际放开的位置见上方“实际权限”。") {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                 ForEach(model.templates, id: \.id) { template in
                     TemplateTile(template: template, enabled: profile.templates.contains { $0.id == template.id }) { enabled in
@@ -331,14 +474,14 @@ private struct ManagedProgramsCard: View {
 
     var body: some View {
         Card(title: "受管程序", systemImage: "app.badge.checkmark",
-             subtitle: "这个配置档管控的可执行文件，会自动获得读取和执行权限。不经过 AgentGuard 直接运行的副本不受沙箱限制，会在这里报告。") {
+             subtitle: "这些可执行文件会自动获得读取和运行权限。没有经过 AgentGuard 运行的副本不受限制，会在这里报告。") {
             Button { adding = true } label: { Label("添加", systemImage: "plus") }
                 .buttonStyle(.borderless)
         } content: {
             VStack(alignment: .leading, spacing: 10) {
                 if !unmanaged.isEmpty {
                     Notice(kind: .error,
-                           text: "发现 \(unmanaged.count) 个没有经过 AgentGuard 启动的进程（PID \(unmanaged.map(String.init).joined(separator: "、"))），它们不受沙箱限制。请结束这些进程，改用 guard run \(profile.id) -- <命令> 或接管启动项来启动。")
+                           text: "发现 \(unmanaged.count) 个没有经过 AgentGuard 运行的副本（PID \(unmanaged.map(String.init).joined(separator: "、"))），它们不受这份权限限制。请结束这些进程，改从 AgentGuard 启动；如果是其他启动项拉起的，可以在“整理现有安装”中停用它。")
                 }
                 Text("如果程序是脚本（例如 npm 安装的 claude），实际运行的是解释器，直接运行它不会被检测到。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -496,20 +639,17 @@ private struct DeleteCard: View {
     let running: Bool
 
     var body: some View {
-        Card(title: "删除配置档", systemImage: "trash",
-             subtitle: "删除全部权限设置和 AgentGuard 安装的启动项，名称可以重新使用。已批准的历史修订和它的状态目录会归档到只有 root 能访问的位置。") {
+        Card(title: "移除这个程序的保护", systemImage: "trash",
+             subtitle: "先停止受管副本，再删除全部权限设置和 AgentGuard 安装的启动项。是否恢复原启动方式由你选择；恢复后程序将不受限制地运行。历史修订和工作目录会归档保留。") {
             HStack(spacing: 12) {
                 if profile.launch?.originalLabel != nil {
-                    Button("删除并恢复原启动项…", role: .destructive) { model.deleteProfile(profile.id, restoreOriginal: true) }
-                        .disabled(running)
-                    Button("删除，不恢复…", role: .destructive) { model.deleteProfile(profile.id) }
-                        .disabled(running)
+                    Button("移除并恢复原启动方式…", role: .destructive) { model.deleteProfile(profile.id, restoreOriginal: true) }
+                    Button("移除，不恢复…", role: .destructive) { model.deleteProfile(profile.id) }
                 } else {
-                    Button("删除配置档…", role: .destructive) { model.deleteProfile(profile.id) }
-                        .disabled(running)
+                    Button("移除保护…", role: .destructive) { model.deleteProfile(profile.id) }
                 }
                 if running {
-                    Text("还有运行中的实例，先停止它再删除").font(.callout).foregroundStyle(.secondary)
+                    Text("会先停止正在运行的副本").font(.callout).foregroundStyle(.secondary)
                 }
             }
         }
@@ -521,21 +661,40 @@ private struct ProgramsAndNetworkCard: View {
     let profile: Profile
     @State private var addingPort = false
 
+    private func networkToggle(_ title: String, detail: String, keyPath: WritableKeyPath<NetworkPolicy, GuardCore.Toggle>) -> some View {
+        SwiftUI.Toggle(isOn: Binding(
+            get: { profile.network[keyPath: keyPath] == .allowed },
+            set: { allowed in model.edit(profile.id) { $0.network[keyPath: keyPath] = allowed ? .allowed : .denied } })) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .toggleStyle(.switch)
+    }
+
     var body: some View {
-        Card(title: "程序与网络", systemImage: "network",
-             subtitle: "允许执行的程序和可连接的本机端口。允许某个端口不代表授权该服务替它做的事。") {
+        Card(title: "运行其他程序与网络", systemImage: "network",
+             subtitle: "允许运行的其他程序、可连接的本机端口和网络范围。允许某个端口不代表授权该服务替它做的事。") {
             VStack(alignment: .leading, spacing: 14) {
                 if profile.unrestrictedExec {
-                    Notice(kind: .warning, text: "允许执行任意程序（从现有安装迁移时保留）。")
+                    Notice(kind: .warning, text: "允许运行任意程序（从现有安装迁移时保留）。")
                 }
-                if !profile.exec.isEmpty {
+                let execs = model.overview(profile).exec
+                if !execs.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("可执行程序").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
-                        ForEach(profile.exec, id: \.path) { grant in
+                        Text("可以运行的程序").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                        ForEach(execs, id: \.path) { exec in
                             HStack(spacing: 8) {
                                 Image(systemName: "play.square").foregroundStyle(.secondary)
-                                Text(PathLabel.abbreviate(grant.path)).font(.system(.callout, design: .monospaced))
-                                    .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(grant.path)
+                                Text(PathLabel.abbreviate(exec.path)).font(.system(.callout, design: .monospaced))
+                                    .lineLimit(2).truncationMode(.middle).textSelection(.enabled).help(exec.path)
+                                Spacer(minLength: 4)
+                                Text(exec.sources.map(\.displayName).joined(separator: "、")).font(.caption).foregroundStyle(.secondary)
+                                if exec.sources.contains(.user) {
+                                    Button { model.removeExec(exec.path, from: profile.id) } label: { Image(systemName: "xmark.circle.fill") }
+                                        .buttonStyle(.borderless).foregroundStyle(.secondary).help("撤回运行这个程序的权限")
+                                }
                             }
                         }
                     }
@@ -564,15 +723,9 @@ private struct ProgramsAndNetworkCard: View {
 
                 Divider()
 
-                Toggle(isOn: Binding(
-                    get: { profile.network.outboundTCP == .allowed },
-                    set: { allowed in model.edit(profile.id) { $0.network.outboundTCP = allowed ? .allowed : .denied } })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("允许对外 TCP 连接")
-                        Text("Agent 连接模型服务通常需要打开").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
+                networkToggle("允许对外 TCP 连接", detail: "Agent 连接模型服务通常需要打开", keyPath: \.outboundTCP)
+                networkToggle("允许接收连接（监听端口）", detail: "只有提供本地服务的程序需要", keyPath: \.listen)
+                networkToggle("允许 UDP", detail: "例如 DNS 以外的直接 UDP 通信，通常不需要", keyPath: \.udp)
             }
         }
         // Keep text fields out of the scrolling detail: AppKit restores focus after a file panel
@@ -622,6 +775,7 @@ private struct AddPortSheet: View {
         guard let port else { return }
         add(port)
     }
+
 }
 
 /// 滚动内容在视口上沿会被硬切一半，正对工具栏下沿时尤其明显。macOS 只在内容滚到工具栏下面时

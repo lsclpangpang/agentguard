@@ -9,6 +9,8 @@ struct MainWindow: View {
     @AppStorage(MainWindow.selectionKey) private var storedSelection = ""
     @State private var selection: String?
     @State private var creating = false
+    @State private var tidying = false
+    @Environment(\.openWindow) private var openWindow
     @State private var sidebarVisible = true
     @AppStorage(MainWindowBehavior.pinnedKey) private var pinned = false
 
@@ -28,7 +30,10 @@ struct MainWindow: View {
         }
         .navigationTitle(selection ?? "AgentGuard")
         .sheet(isPresented: $creating) {
-            NewProfileSheet(isPresented: $creating).environmentObject(model)
+            NewProgramWizard(isPresented: $creating) { selection = $0 }.environmentObject(model)
+        }
+        .sheet(isPresented: $tidying) {
+            TidyUpSheet(isPresented: $tidying).environmentObject(model)
         }
         .sheet(item: $model.confirmation, onDismiss: { NSApp.keyWindow?.makeFirstResponder(nil) }) { pending in
             ConfirmationSheet(pending: pending) { model.answerConfirmation($0) }
@@ -43,16 +48,17 @@ struct MainWindow: View {
             }
             ToolbarItem(placement: .navigation) {
                 Menu {
-                    Button("新建配置档…") { creating = true }
+                    Button("添加程序…") { creating = true }
+                    Button("整理现有安装…") { tidying = true }
                     Divider()
-                    Button("导入现有 Knodo 沙箱") { model.importKnodo() }
+                    Button("迁移现有 Knodo 沙箱…") { model.importKnodo() }
                 } label: {
                     Label("添加", systemImage: "plus")
                 } primaryAction: {
                     creating = true
                 }
                 .disabled(!model.helperReachable)
-                .help("新建配置档")
+                .help("添加要保护的程序")
             }
             ToolbarItem(placement: .automatic) {
                 CollectorTipsButton(
@@ -60,6 +66,15 @@ struct MainWindow: View {
                     reachable: model.helperReachable,
                     acknowledge: model.acknowledgeCollectorProblems
                 )
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    openWindow(id: "settings")
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Label("设置", systemImage: "gearshape")
+                }
+                .help("AgentGuard 设置、故障处理与卸载")
             }
             ToolbarItem(placement: .automatic) {
                 Toggle(isOn: $pinned) {
@@ -75,6 +90,10 @@ struct MainWindow: View {
             selection = storedSelection.isEmpty ? nil : storedSelection
         }
         .onChange(of: selection) { _, value in storedSelection = value ?? "" }
+        // The menu bar writes the program the user picked there; follow it while the window is open.
+        .onChange(of: storedSelection) { _, value in
+            if !value.isEmpty, value != selection { selection = value }
+        }
         .onChange(of: model.report?.profiles.map(\.profileID) ?? []) { _, ids in
             // 列表暂时为空（查询失败/正在刷新）时保持当前选择，别把详情页拆掉重建。
             guard !ids.isEmpty else { return }
@@ -85,17 +104,15 @@ struct MainWindow: View {
 
     private var sidebar: some View {
         List(selection: $selection) {
-            Section("配置档") {
+            Section("我的程序") {
                 ForEach(model.report?.profiles ?? [], id: \.profileID) { profile in
                     SidebarRow(profile: profile)
                         .tag(profile.profileID)
                         .contextMenu {
                             if model.profile(profile.profileID)?.launch?.originalLabel != nil {
-                                Button("删除并恢复原启动项…", role: .destructive) { model.deleteProfile(profile.profileID, restoreOriginal: true) }
-                                    .disabled(!profile.runningInstances.isEmpty)
+                                Button("移除保护并恢复原启动方式…", role: .destructive) { model.deleteProfile(profile.profileID, restoreOriginal: true) }
                             }
-                            Button("删除配置档…", role: .destructive) { model.deleteProfile(profile.profileID) }
-                                .disabled(!profile.runningInstances.isEmpty)
+                            Button("移除保护…", role: .destructive) { model.deleteProfile(profile.profileID) }
                         }
                         .badge(profile.pendingCount)
                 }
@@ -105,8 +122,8 @@ struct MainWindow: View {
         .overlay {
             if model.helperReachable && (model.report?.profiles.isEmpty ?? true) {
                 VStack(spacing: 8) {
-                    Text("还没有配置档").foregroundStyle(.secondary)
-                    Button("新建配置档") { creating = true }
+                    Text("还没有受保护的程序").foregroundStyle(.secondary)
+                    Button("添加程序") { creating = true }
                 }
             }
         }
@@ -121,8 +138,8 @@ struct MainWindow: View {
                 } else if let selection, model.profile(selection) != nil {
                     ProfileDetailView(profileID: selection).id(selection)
                 } else {
-                    ContentUnavailableView("选择一个配置档", systemImage: "shield.lefthalf.filled",
-                                           description: Text("或者点工具栏的 + 新建，开始为命令行工具或 Agent 设定权限。"))
+                    ContentUnavailableView("选择一个程序", systemImage: "shield.lefthalf.filled",
+                                           description: Text("或者点工具栏的 +，选择要保护的程序和它可以访问的项目文件夹。"))
                 }
             }
             .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
@@ -149,7 +166,13 @@ struct MainWindow: View {
             items.append(Notice(kind: .error, text: error, actionTitle: "关闭") { model.lastError = nil })
         }
         if let warning = model.lastWarning {
-            items.append(Notice(kind: .warning, text: "上次操作提示：" + warning, actionTitle: "关闭") { model.lastWarning = nil })
+            items.append(Notice(kind: .warning, text: "上次操作中没有确认的部分：\n" + warning, actionTitle: "关闭") { model.lastWarning = nil })
+        }
+        if let notice = model.lastNotice {
+            items.append(Notice(kind: .info, text: notice, actionTitle: "关闭") { model.lastNotice = nil })
+        }
+        if model.helperOutdated {
+            items.append(Notice(kind: .warning, text: "后台服务还是旧版本，部分功能不可用。", actionTitle: "检查并修复") { model.installHelper() })
         }
         if !model.helperReachable && model.report != nil {
             items.append(Notice(kind: .warning, text: "暂时连不上 Helper，下面是上次的状态，修改不会生效。正在重试…"))
@@ -213,14 +236,19 @@ private struct SidebarRow: View {
     @EnvironmentObject var model: AppModel
     let profile: ProfileStatusReport
 
+    private var summary: ProgramStatusSummary {
+        ProgramStatusSummary.evaluate(profile, freshness: model.freshness, programName: profile.profileID,
+                                      hasLaunch: model.profile(profile.profileID)?.launch != nil)
+    }
+
     var body: some View {
         HStack(spacing: 10) {
-            IconTile(systemImage: profile.mode.symbol, tint: profile.mode.tint, size: 24)
+            IconTile(systemImage: "app.badge.checkmark", tint: Theme.color(summary.level), size: 24)
             VStack(alignment: .leading, spacing: 1) {
                 Text(profile.profileID)
                 HStack(spacing: 4) {
-                    Circle().fill(model.revisionLabel(profile).tint).frame(width: 6, height: 6)
-                    Text(model.revisionLabel(profile).text).font(.caption).foregroundStyle(.secondary)
+                    Circle().fill(Theme.color(summary.level)).frame(width: 6, height: 6)
+                    Text(summary.headline).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
         }
@@ -282,112 +310,4 @@ private struct Step: View {
     }
 }
 
-struct NewProfileSheet: View {
-    @EnvironmentObject var model: AppModel
-    @Binding var isPresented: Bool
-    @State private var name = ""
-    @State private var selected: Set<String> = ["system-base"]
-    @State private var program: String?
-    @State private var runsInBackground = false
-    @State private var arguments = ""
-    @State private var runAtLogin = false
-
-    private var nameIsValid: Bool { ProfileID.isValid(name) }
-    private var nameTaken: Bool { model.report?.profiles.contains { $0.profileID == name } ?? false }
-
-    private var launch: LaunchSettings? {
-        guard runsInBackground, let program, let parsed = try? LaunchArguments.parse(arguments) else { return nil }
-        return LaunchSettings(executable: program, arguments: parsed, workingDirectory: nil,
-                              originalLabel: nil, restartOnCleanExit: false, runAtLogin: runAtLogin)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("新建配置档").font(.title2.weight(.semibold))
-                Text("新配置档以“受限学习”开始：未允许的访问会被拒绝并列为待定项，逐项批准后再切换到强制保护。")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("名称").font(.headline)
-                TextField("例如 claude-work", text: $name).textFieldStyle(.roundedBorder)
-                Group {
-                    if name.isEmpty {
-                        Text("小写字母、数字和 -，用于 guard run <名称>")
-                    } else if !nameIsValid {
-                        Text("只能使用小写字母、数字和 -，且不能以 - 开头").foregroundStyle(.red)
-                    } else if nameTaken {
-                        Text("已有同名配置档").foregroundStyle(.red)
-                    } else {
-                        Text("命令行启动：guard run \(name) -- <命令>")
-                    }
-                }
-                .font(.caption).foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("要管控的程序").font(.headline)
-                HStack(spacing: 8) {
-                    if let program {
-                        PathLabel(path: program).frame(maxWidth: .infinity, alignment: .leading)
-                        Button("更换…") { Task { if let picked = await model.chooseExecutable() { self.program = picked } } }
-                        Button { self.program = nil } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.borderless).foregroundStyle(.secondary).help("不指定程序")
-                    } else {
-                        Text("可选。指定后，没有经过 AgentGuard 直接运行它会被报告。").font(.callout).foregroundStyle(.secondary)
-                        Spacer(minLength: 8)
-                        Button("选择…") { Task { if let picked = await model.chooseExecutable() { program = picked } } }
-                    }
-                }
-                if program != nil {
-                    Picker("启动方式", selection: $runsInBackground) {
-                        Text("命令行工具（guard run）").tag(false)
-                        Text("后台程序（在界面启动）").tag(true)
-                    }
-                    .pickerStyle(.radioGroup)
-                    if runsInBackground {
-                        TextField("启动参数（可选，带空格的参数用引号包住）", text: $arguments).textFieldStyle(.roundedBorder)
-                        Toggle("登录 Mac 时自动启动", isOn: $runAtLogin)
-                        if (try? LaunchArguments.parse(arguments)) == nil { Text("启动参数的引号或反斜杠不完整").font(.caption).foregroundStyle(.red) }
-                        Text("创建后在“启动方式”里点“启动程序”。如需替换已有自启任务，可在“编辑设置”中直接选择。需要终端输入的工具请选命令行方式。")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("运行时模板").font(.headline)
-                ForEach(model.templates, id: \.id) { template in
-                    let info = TemplateInfo.of(template.id)
-                    Toggle(isOn: Binding(
-                        get: { selected.contains(template.id) },
-                        set: { if $0 { selected.insert(template.id) } else { selected.remove(template.id) } })) {
-                        HStack(spacing: 10) {
-                            IconTile(systemImage: info.symbol, size: 24)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(info.title)
-                                Text(info.detail).font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .toggleStyle(.checkbox)
-                }
-            }
-
-            HStack {
-                Spacer()
-                Button("取消") { isPresented = false }.keyboardShortcut(.cancelAction)
-                Button("创建") {
-                    model.createProfile(id: name, templateIDs: selected, program: program, launch: launch)
-                    isPresented = false
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!nameIsValid || nameTaken || (runsInBackground && (try? LaunchArguments.parse(arguments)) == nil))
-            }
-        }
-        .padding(24)
-        .frame(width: 460)
-    }
-}
 #endif

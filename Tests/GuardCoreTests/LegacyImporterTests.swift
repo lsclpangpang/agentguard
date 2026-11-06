@@ -80,3 +80,17 @@ import Foundation
         _ = try PolicyCompiler(environment: env).compile(try run().profile, catalog: TemplateCatalog([]))
     }
 }
+
+@Suite struct MigrationPreviewTests {
+    @Test func namesWhatIsKeptAndWhatIsNot() throws {
+        var result = ImportResult(profile: Fixtures.profile(files: [Fixtures.rw("/Users/me/work")], extraRules: [#"(allow file-read* (regex #"^/x"))"#]),
+                                  baseRules: [], unimportedRules: ["(deny file-write* (subpath \"/y\"))"])
+        result.profile.launch = LaunchSettings(executable: "/opt/entry.sh", arguments: [], workingDirectory: nil, originalLabel: "com.knodo.agent",
+                                               restartOnCleanExit: true)
+        let lines = MigrationPreview.lines(for: result, templates: [], environment: Fixtures.environment)
+        #expect(lines.contains("  读写 /Users/me/work"))
+        #expect(lines.contains("以下旧规则无法核对，会原样保留，迁移后会提示逐条处理："))
+        #expect(lines.contains("  (deny file-write* (subpath \"/y\"))"))
+        #expect(lines.contains { $0.contains("先备份原启动项 com.knodo.agent") })
+    }
+}

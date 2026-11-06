@@ -25,12 +25,12 @@ struct LaunchCard: View {
 
     var body: some View {
         Card(title: "启动方式", systemImage: "power",
-             subtitle: "由 AgentGuard 加载权限后启动程序，可选择登录时自动启动。") {
+             subtitle: "由 AgentGuard 加载权限后启动程序。停止本次运行和登录自启是两件事，分别设置。") {
             HStack(spacing: 10) {
                 Button { tips.toggle() } label: { Image(systemName: "info.circle") }
                     .buttonStyle(.borderless).help("启动方式说明")
                     .popover(isPresented: $tips) {
-                        Text("设置启动方式后，点“启动程序”即可在已批准的权限下运行。登录自启开启后，每次登录 Mac 也会经过同样的启动过程。\n\n保存设置后，需要启动或重启程序才会应用。直接从其他入口打开的程序不受这份配置限制。")
+                        Text("设置启动方式后，点“启动程序”即可在已保存的权限下运行。\n\n停止本次运行：结束这次运行的程序，本次登录期间不会自动拉起，以后登录仍按登录自启设置。\n关闭登录自启：只影响以后的登录，不会停止现在的程序。\n\n直接从其他入口打开的程序不受这份权限限制，可在“整理现有安装”中处理。")
                             .font(.callout).padding(16).frame(width: 300)
                     }
                 Button(profile.launch == nil ? "设置启动方式…" : "编辑设置…") { editing = true }
@@ -52,9 +52,19 @@ struct LaunchCard: View {
                     Text(LaunchArguments.format([PathLabel.abbreviate(launch.executable)] + launch.arguments))
                         .font(.system(.callout, design: .monospaced))
                         .textSelection(.enabled).lineLimit(3).truncationMode(.middle)
+                    SwiftUI.Toggle(isOn: Binding(get: { launch.runAtLogin }, set: { model.setRunAtLogin($0, for: profile.id) })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("登录 Mac 时自动启动 \(profile.id)")
+                            Text("只影响以后的登录，不会停止或启动现在的程序。").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .disabled(!ready)
                     if needsApply {
-                        Text("登录自启设置尚未应用，启动或重启程序后生效。")
-                            .font(.callout).foregroundStyle(.orange)
+                        HStack(spacing: 8) {
+                            Text("登录自启设置尚未应用到系统启动项。").font(.callout).foregroundStyle(.orange)
+                            Button("现在应用") { model.applyLoginSetting(profile.id) }.controlSize(.small).disabled(!ready)
+                        }
                     }
                     if !(status?.detachedInstances.isEmpty ?? true) {
                         Text("启动入口已退出，部分子程序仍在运行，异常后可能无法自动重启。请检查入口脚本的启动方式。")
@@ -97,12 +107,15 @@ struct LaunchCard: View {
     }
 
     @ViewBuilder private var actions: some View {
-        Button(running ? (needsApply ? "应用设置并重启" : "重启程序") : "启动程序") {
+        Button(running ? "重启并应用" : "启动程序") {
             if running { model.restartManaged(profile.id) } else { model.installLaunchAgent(profile.id) }
         }
         .buttonStyle(.borderedProminent)
-        if startup?.registered == true || startup?.runAtLogin == true || startup?.problem != nil || running {
-            Button("停止并取消自启…") { model.removeManagement(profile.id, restoreOriginal: false) }
+        if running {
+            Button("停止本次运行…") { model.stopManaged(profile.id) }
+        }
+        if startup?.problem != nil {
+            Button("清理启动项…") { model.removeManagement(profile.id, restoreOriginal: false) }
         }
         if startup?.canRestoreOriginal == true {
             Button("恢复原启动方式…", role: .destructive) { model.removeManagement(profile.id, restoreOriginal: true) }

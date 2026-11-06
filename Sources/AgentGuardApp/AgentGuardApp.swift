@@ -21,6 +21,11 @@ struct AgentGuardApp: App {
         }
         .windowToolbarStyle(.unified)
         .defaultSize(width: 1080, height: 720)
+
+        Window("AgentGuard 设置", id: "settings") {
+            SettingsView().environmentObject(model)
+        }
+        .windowResizability(.contentSize)
     }
 
     /// Menu bar icons are template images; the shape, not the color, carries the state.

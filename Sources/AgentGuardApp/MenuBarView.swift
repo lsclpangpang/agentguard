@@ -62,8 +62,8 @@ struct MenuBarView: View {
     private func headline(_ overall: OverallStatus) -> String {
         guard model.helperReachable else { return "Helper 未连接" }
         let count = model.report?.profiles.count ?? 0
-        if count == 0 { return "还没有受管对象" }
-        return overall.reasons.isEmpty ? "\(count) 个配置档均已生效" : "\(count) 个配置档，\(overall.reasons.count) 项需要处理"
+        if count == 0 { return "还没有受保护的程序" }
+        return overall.reasons.isEmpty ? "\(count) 个程序的保护均已确认" : "\(count) 个程序，\(overall.reasons.count) 项需要处理"
     }
 
     /// Each reason on its own line; joined into one sentence they were cut off after two lines.
@@ -92,7 +92,7 @@ struct MenuBarView: View {
             }
         } else if let profiles = model.report?.profiles, !profiles.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                Text("配置档")
+                Text("我的程序")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 14)
@@ -111,8 +111,8 @@ struct MenuBarView: View {
             .padding(.top, 4)
             .padding(.bottom, 8)
         } else {
-            placeholder(symbol: "shield.lefthalf.filled", title: "还没有配置档", detail: "为命令行工具或 Agent 设定它能访问的文件和网络。") {
-                Button("新建配置档") { open(nil) }.controlSize(.small)
+            placeholder(symbol: "shield.lefthalf.filled", title: "还没有受保护的程序", detail: "选择要保护的程序，限定它能访问的文件和网络。") {
+                Button("添加程序") { open(nil) }.controlSize(.small)
             }
         }
     }
@@ -140,12 +140,20 @@ struct MenuBarView: View {
                 }
                 .buttonStyle(MenuFooterButtonStyle())
                 .keyboardShortcut("o")
+                Button {
+                    openWindow(id: "settings")
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Label("设置", systemImage: "gearshape")
+                }
+                .buttonStyle(MenuFooterButtonStyle(secondary: true))
                 Spacer()
                 Button { NSApp.terminate(nil) } label: {
                     Label("退出", systemImage: "power")
                 }
                 .buttonStyle(MenuFooterButtonStyle(secondary: true))
                 .keyboardShortcut("q")
+                .help("退出窗口和菜单栏。受管程序和后台限制继续运行，登录启动设置不变。")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
@@ -165,21 +173,25 @@ private struct MenuProfileRow: View {
     @State private var hovering = false
 
     private var problem: (text: String, tint: Color)? {
-        if !profile.unmanagedProcesses.isEmpty { return ("\(profile.unmanagedProcesses.count) 未受管", .red) }
-        if !profile.detachedInstances.isEmpty { return ("已脱离看护", .orange) }
-        if profile.pendingCount > 0 { return ("\(profile.pendingCount) 待定", .orange) }
+        if !profile.unmanagedProcesses.isEmpty { return ("\(profile.unmanagedProcesses.count) 个未受保护", .red) }
+        if !profile.detachedInstances.isEmpty { return ("入口已退出", .orange) }
+        if profile.pendingCount > 0 { return ("\(profile.pendingCount) 项待处理", .orange) }
         return nil
+    }
+
+    private var summary: ProgramStatusSummary {
+        ProgramStatusSummary.evaluate(profile, freshness: model.freshness, programName: profile.profileID,
+                                      hasLaunch: model.profile(profile.profileID)?.launch != nil)
     }
 
     var body: some View {
         HStack(spacing: 10) {
-            IconTile(systemImage: profile.mode.symbol, tint: profile.mode.tint, size: 28)
+            IconTile(systemImage: "app.badge.checkmark", tint: Theme.color(summary.level), size: 28)
             VStack(alignment: .leading, spacing: 2) {
                 Text(profile.profileID).font(.system(size: 13, weight: .medium)).lineLimit(1)
                 HStack(spacing: 5) {
-                    Circle().fill(model.revisionLabel(profile).tint).frame(width: 6, height: 6)
-                    Text("\(profile.mode.displayName) · \(model.revisionLabel(profile).text)")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Circle().fill(Theme.color(summary.level)).frame(width: 6, height: 6)
+                    Text(summary.headline).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
             Spacer(minLength: 6)

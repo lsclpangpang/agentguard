@@ -20,6 +20,10 @@ final class AppModel: ObservableObject {
     @Published var helperReachable = false
     @Published var lastError: String?
     @Published var lastWarning: String?
+    /// Confirmed results of the last action, e.g. which processes a stop ended.
+    @Published var lastNotice: String?
+    /// Recent activity per profile, loaded when its activity tab is shown.
+    @Published var activity: [String: ActivityLog] = [:]
     @Published var pending: [String: [PendingItem]] = [:]
     @Published var revision = 0
     /// Install progress shown in the Helper banner; cleared as soon as the Helper answers.
@@ -58,10 +62,18 @@ final class AppModel: ObservableObject {
             ObjectStatus(profileID: profile.profileID,
                          protection: ProtectionState.derive(mode: profile.mode, observeUntil: nil, revision: profile.revisionState),
                          revision: profile.revisionState, pendingItems: profile.pendingCount, unmanagedInstances: profile.unmanagedProcesses.count,
-                         detachedInstances: profile.detachedInstances.count)
+                         detachedInstances: profile.detachedInstances.count, untrackedInstances: profile.untrackedInstances.count)
         }
         let health = CollectorHealth(problems: report.collectorProblems.isEmpty ? [] : [.interrupted])
-        return OverallStatus.evaluate(objects: objects, collector: health, freshness: freshness)
+        let status = OverallStatus.evaluate(objects: objects, collector: health, freshness: freshness)
+        guard helperOutdated else { return status }
+        return OverallStatus(level: max(status.level, .attention), reasons: ["后台服务版本较旧，需要更新：在设置中点“检查并修复”"] + status.reasons)
+    }
+
+    /// The Helper answered but speaks an older protocol: the App was updated, the Helper was not.
+    var helperOutdated: Bool {
+        guard helperReachable, let report else { return false }
+        return report.helperProtocol < HelperProtocol.version
     }
 
     var freshness: StatusFreshness { StatusFreshness.evaluate(confirmedAt: statusConfirmedAt, now: Date()) }
@@ -98,7 +110,7 @@ final class AppModel: ObservableObject {
     }
 
     /// Returns this request's snapshot, rather than the previous report cached by the UI.
-    private func refreshReport(timeout: TimeInterval = 60, includePending: Bool = true) async -> StatusReport? {
+    func refreshReport(timeout: TimeInterval = 60, includePending: Bool = true) async -> StatusReport? {
         let status = await Task.detached {
             try? HelperClient().send(.status, timeout: timeout)
         }.value
@@ -214,44 +226,73 @@ final class AppModel: ObservableObject {
 
     // MARK: Changes
 
+    /// How one proposed change ended; callers that keep a form open use it to decide whether to close.
+    enum SubmitOutcome: Equatable {
+        case applied(revision: Int)
+        case unchanged
+        case cancelled
+        case failed(String)
+    }
+
     /// Proposes `profile` as the next revision, shows the exact diff, and asks for system
     /// authentication when the change widens permissions.
     /// `unchangedHint` replaces the bare "没有变化" when the caller knows why an edit may compile to the same policy.
     /// `warnings` are shown above the change itself, e.g. access that legacy rules will keep granting.
     func submit(_ profile: Profile, unchangedHint: String? = nil, warnings: [String] = []) {
-        Task.detached {
-            let logger = Logger(subsystem: "com.lsclpangpang.agentguard", category: "ui")
-            do {
-                let client = HelperClient()
-                logger.debug("submit: 开始 propose \(profile.id, privacy: .public) rev\(profile.revision) mode=\(String(describing: profile.mode), privacy: .public)")
-                let proposal = try client.send(.proposeChange(profile: profile))
-                logger.debug("submit: propose 返回 \(String(describing: proposal).prefix(120), privacy: .public)")
-                guard case let .pending(info) = proposal else {
-                    throw Self.failure(proposal, diagnosis: Self.compileDiagnosis(for: profile, config: self.config))
-                }
-                if info.summary.isEmpty {
-                    logger.debug("submit: 差异为空，标记没有变化")
-                    await MainActor.run { self.lastError = unchangedHint ?? "没有变化" }
-                    return
-                }
-                let confirmed = await self.askConfirmation("确认权限变更：\(profile.id)", warnings + info.summary)
-                guard confirmed else { return }
+        Task { _ = await submitAsync(profile, unchangedHint: unchangedHint, warnings: warnings) }
+    }
+
+    @discardableResult
+    func submitAsync(_ profile: Profile, unchangedHint: String? = nil, warnings: [String] = []) async -> SubmitOutcome {
+        let config = self.config
+        let logger = Logger(subsystem: "com.lsclpangpang.agentguard", category: "ui")
+        let proposal = await Task.detached { () -> Result<HelperResponse, Error> in
+            Result { try HelperClient().send(.proposeChange(profile: profile)) }
+        }.value
+        let info: PendingChangeInfo
+        switch proposal {
+        case let .success(.pending(pending)):
+            info = pending
+        case let .success(response):
+            return finish(.failed("\(Self.failure(response, diagnosis: Self.compileDiagnosis(for: profile, config: config)))"))
+        case let .failure(error):
+            return finish(.failed("\(error)"))
+        }
+        if info.summary.isEmpty {
+            logger.debug("submit: 差异为空，标记没有变化")
+            lastError = unchangedHint ?? "没有变化"
+            return .unchanged
+        }
+        guard await askConfirmation("确认权限变更：\(profile.id)", warnings + info.summary) else { return .cancelled }
+        let result = await Task.detached { () -> Result<HelperResponse, Error> in
+            Result {
                 var token: Data?
                 if info.requiresAuthorization {
                     token = try UserAuthorization.obtain(scope: HelperService.authorizationScope(forChange: info.id),
                                                          prompt: "AgentGuard 将为 \(profile.id) 扩大权限：\n" + info.summary.joined(separator: "\n"))
                 }
-                let result = try client.send(.approveChange(changeID: info.id, digest: info.digest, authorization: token))
-                guard case .applied = result else {
-                    throw Self.failure(result, diagnosis: Self.compileDiagnosis(for: profile, config: self.config))
-                }
-                await MainActor.run { self.lastError = nil }
-            } catch {
-                logger.error("submit: 失败 \(String(describing: error), privacy: .public)")
-                await MainActor.run { self.lastError = "\(error)" }
+                return try HelperClient().send(.approveChange(changeID: info.id, digest: info.digest, authorization: token))
             }
-            await MainActor.run { self.refresh() }
+        }.value
+        switch result {
+        case let .success(.applied(revision)):
+            lastError = nil
+            refresh()
+            return .applied(revision: revision)
+        case let .success(response):
+            return finish(.failed("\(Self.failure(response, diagnosis: Self.compileDiagnosis(for: profile, config: config)))"))
+        case let .failure(error):
+            return finish(.failed("\(error)"))
         }
+    }
+
+    private func finish(_ outcome: SubmitOutcome) -> SubmitOutcome {
+        if case let .failed(message) = outcome {
+            Logger(subsystem: "com.lsclpangpang.agentguard", category: "ui").error("submit: 失败 \(message, privacy: .public)")
+            lastError = message
+        }
+        refresh()
+        return outcome
     }
 
     func edit(_ id: String, unchangedHint: String? = nil, warnings: [String] = [], _ change: (inout Profile) -> Void) {
@@ -269,15 +310,13 @@ final class AppModel: ObservableObject {
                                         caseInsensitive: config.environment.caseInsensitive)) ?? grants
     }
 
-    /// `program` is what the profile manages; `launch` is set only when it should run as a background item.
-    func createProfile(id: String, templateIDs: Set<String>, program: String? = nil, launch: LaunchSettings? = nil) {
-        guard ProfileID.isValid(id) else {
+    /// Creates a profile and waits for the outcome, so the form that asked can stay open on failure.
+    func createProfile(_ profile: Profile) async -> SubmitOutcome {
+        guard ProfileID.isValid(profile.id) else {
             lastError = HelperFailure.message(for: "invalid_profile")
-            return
+            return .failed(HelperFailure.message(for: "invalid_profile"))
         }
-        let refs = templates.filter { templateIDs.contains($0.id) }.map { TemplateRef(id: $0.id, version: $0.version) }
-        submit(Profile(id: id, revision: 1, mode: .restrictedLearning, templates: refs, files: [], exec: [], network: NetworkPolicy(),
-                       launch: launch, programs: program.map { [$0] } ?? []))
+        return await submitAsync(profile)
     }
 
     /// Shows the file panel without checking the result; nil when the user cancels.
@@ -331,7 +370,7 @@ final class AppModel: ObservableObject {
     }
 
     func deleteProfile(_ id: String, restoreOriginal: Bool = false) {
-        var lines = ["删除配置档 \(id) 及其全部权限设置；已批准的历史修订会归档保留", "之后 guard run \(id) 将无法启动"]
+        var lines = ["删除 \(id) 的全部权限设置；已批准的历史修订会归档保留", "之后 guard run \(id) 将无法启动"]
         // 在进 detached 任务之前先取好：profile(_:) 是 MainActor 隔离的，detached 里不能直接调。
         let originalLabel = profile(id)?.launch?.originalLabel
         if let launch = profile(id)?.launch {
@@ -340,8 +379,18 @@ final class AppModel: ObservableObject {
                 lines.append(restoreOriginal ? "恢复原启动项 \(original)：之后将无限制运行" : "不恢复原启动项 \(original)")
             }
         }
+        let running = status(for: id)?.runningInstances ?? []
+        if !running.isEmpty { lines.insert("先停止正在运行的 \(running.count) 个副本（#\(running.map(String.init).joined(separator: "、#"))）", at: 0) }
         Task {
-            guard await askConfirmation("删除配置档 \(id)", lines) else { return }
+            guard await askConfirmation("移除 \(id) 的保护", lines) else { return }
+            if !running.isEmpty {
+                guard await sendAsync(.stopManaged(profileID: id), refreshAfter: false) else { return }
+                _ = await refreshReport()
+                if !(status(for: id)?.runningInstances.isEmpty ?? true) {
+                    lastError = "还有运行中的副本没有确认停止，没有删除。请稍后重试或手动结束它们。"
+                    return
+                }
+            }
             Task.detached {
                 do {
                     let restores = restoreOriginal && originalLabel != nil
@@ -409,10 +458,10 @@ final class AppModel: ObservableObject {
             // entry.sh is a script, so the process to watch for is the daemon it starts.
             let daemon = root + "/release/knodo-agentd"
             if FileManager.default.isExecutableFile(atPath: daemon) { result.profile.programs = [daemon] }
+            let preview = MigrationPreview.lines(for: result, templates: templates, environment: config.environment)
             Task {
-                if !result.unimportedRules.isEmpty {
-                    _ = await askConfirmation("以下规则无法导入，请手动核对", result.unimportedRules)
-                }
+                // Cancelling here stops the import; nothing has been changed yet.
+                guard await askConfirmation("迁移现有 Knodo 沙箱", preview) else { return }
                 submit(result.profile)
             }
         } catch {
@@ -430,11 +479,13 @@ final class AppModel: ObservableObject {
             guard let launch = profile(id)?.launch else { return }
             var lines = ["按已保存的权限启动：" + LaunchArguments.format([launch.executable] + launch.arguments),
                          launch.runAtLogin ? "启用登录自启，后续登录也通过 AgentGuard 启动" : "仅在本次登录中启动，不添加登录自启"]
-            if !(status(for: id)?.runningInstances.isEmpty ?? true) { lines.insert("结束此配置当前运行的受管实例", at: 0) }
+            if !(status(for: id)?.runningInstances.isEmpty ?? true) {
+                lines.insert("结束 \(id) 当前运行的副本，正在进行的任务会被中断；重启后旧权限才会收回", at: 0)
+            }
             if let original = launch.originalLabel, status(for: id)?.launchAgent?.canRestoreOriginal != true {
                 lines.append("备份并替换原自启任务：\(original)")
             }
-            guard await askConfirmation("\(restart ? "重启" : "启动") \(id)", lines) else { return }
+            guard await askConfirmation("\(restart ? "重启并应用" : "启动") \(id)", lines) else { return }
             restartingProfiles.insert(id)
             defer { restartingProfiles.remove(id) }
             guard await sendAsync(restart ? .restartManagedInstance(profileID: id) : .installLaunchAgent(profileID: id), refreshAfter: false) else {
@@ -446,7 +497,11 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 let remaining = deadline.timeIntervalSinceNow
                 guard remaining > 0, let snapshot = await refreshReport(timeout: remaining) else { break }
-                if snapshot.profiles.first(where: { $0.profileID == id })?.revisionState == .applied(running: true) { break }
+                if snapshot.profiles.first(where: { $0.profileID == id })?.revisionState == .applied(running: true) {
+                    lastNotice = [lastNotice, restart ? "\(id) 已重启，当前权限已生效，旧权限已收回。可以重新尝试之前失败的操作。" : "\(id) 已启动，当前权限已生效。"]
+                        .compactMap { $0 }.joined(separator: "\n")
+                    break
+                }
                 do { try await Task.sleep(nanoseconds: 500_000_000) } catch { break }
             }
         }
@@ -484,15 +539,24 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    nonisolated private func sendAsync(_ request: HelperRequest, refreshAfter: Bool = true) async -> Bool {
+    nonisolated func sendAsync(_ request: HelperRequest, refreshAfter: Bool = true) async -> Bool {
         var succeeded = false
         do {
             let response = try HelperClient().send(request)
             if case .failure = response { throw Self.failure(response) }
             await MainActor.run {
                 self.lastError = nil
-                if case let .completed(warnings) = response { self.lastWarning = warnings.joined(separator: "\n") }
-                else { self.lastWarning = nil }
+                switch response {
+                case let .completed(warnings):
+                    self.lastWarning = warnings.joined(separator: "\n")
+                    self.lastNotice = nil
+                case let .report(report):
+                    self.lastWarning = report.problems.isEmpty ? nil : report.problems.joined(separator: "\n")
+                    self.lastNotice = report.notes.isEmpty ? nil : report.notes.joined(separator: "\n")
+                default:
+                    self.lastWarning = nil
+                    self.lastNotice = nil
+                }
             }
             succeeded = true
         } catch {
