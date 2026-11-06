@@ -5,6 +5,10 @@ public enum PolicyChange: Hashable, Sendable {
     case fileAccessChanged(path: String, from: Access, to: Access)
     case fileKindChanged(path: String, from: PathKind, to: PathKind)
     case fileSecretsFlagChanged(path: String, to: Bool)
+    case patternAdded(EffectivePatternGrant)
+    case patternRemoved(EffectivePatternGrant)
+    case patternAccessChanged(pattern: String, kind: PathKind, from: Access, to: Access)
+    case patternSecretsFlagChanged(pattern: String, kind: PathKind, to: Bool)
     case execAdded(EffectiveExecGrant)
     case execRemoved(EffectiveExecGrant)
     case execHashChanged(path: String, from: String?, to: String?)
@@ -24,8 +28,10 @@ public enum PolicyChange: Hashable, Sendable {
     public var expands: Bool {
         switch self {
         case let .modeChanged(from, to): return !from.liftsBoundary && to.liftsBoundary
-        case .fileAdded, .execAdded, .loopbackPortAdded, .extraRuleAdded: return true
-        case .fileRemoved, .execRemoved, .loopbackPortRemoved, .fileSecretsFlagChanged, .extraRuleRemoved: return false
+        case .fileAdded, .patternAdded, .execAdded, .loopbackPortAdded, .extraRuleAdded: return true
+        case .fileRemoved, .patternRemoved, .execRemoved, .loopbackPortRemoved, .fileSecretsFlagChanged, .patternSecretsFlagChanged, .extraRuleRemoved:
+            return false
+        case let .patternAccessChanged(_, _, _, to): return to == .readWrite
         // Only marks what to watch; the program's exec and read grants carry the widening.
         case .programAdded, .programRemoved: return false
         case let .unrestrictedExecChanged(to): return to
@@ -46,6 +52,7 @@ public struct PolicyDiff: Hashable, Sendable {
         var changes: [PolicyChange] = []
         if old.mode != new.mode { changes.append(.modeChanged(from: old.mode, to: new.mode)) }
         changes += Self.fileChanges(old.files, new.files)
+        changes += Self.patternChanges(old.patterns, new.patterns)
         if old.launch != new.launch { changes.append(.launchChanged(to: new.launch)) }
         let oldPrograms = Set(old.programs), newPrograms = Set(new.programs)
         changes += newPrograms.subtracting(oldPrograms).sorted().map(PolicyChange.programAdded)
@@ -89,6 +96,25 @@ public struct PolicyDiff: Hashable, Sendable {
         return changes
     }
 
+    /// A pattern's file and directory forms are different grants, so both make up the key.
+    private static func patternChanges(_ old: [EffectivePatternGrant], _ new: [EffectivePatternGrant]) -> [PolicyChange] {
+        func key(_ g: EffectivePatternGrant) -> String { g.pattern + "|" + g.kind.rawValue }
+        let before = Dictionary(old.map { (key($0), $0) }, uniquingKeysWith: { a, _ in a })
+        let after = Dictionary(new.map { (key($0), $0) }, uniquingKeysWith: { a, _ in a })
+        var changes: [PolicyChange] = []
+        for k in Set(before.keys).union(after.keys).sorted() {
+            switch (before[k], after[k]) {
+            case let (nil, added?): changes.append(.patternAdded(added))
+            case let (removed?, nil): changes.append(.patternRemoved(removed))
+            case let (a?, b?):
+                if a.access != b.access { changes.append(.patternAccessChanged(pattern: b.pattern, kind: b.kind, from: a.access, to: b.access)) }
+                if a.readsSecrets != b.readsSecrets { changes.append(.patternSecretsFlagChanged(pattern: b.pattern, kind: b.kind, to: b.readsSecrets)) }
+            case (nil, nil): break
+            }
+        }
+        return changes
+    }
+
     private static func execChanges(_ old: [EffectiveExecGrant], _ new: [EffectiveExecGrant]) -> [PolicyChange] {
         let before = Dictionary(old.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
         let after = Dictionary(new.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
@@ -113,6 +139,10 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .fileAccessChanged(path, from, to): return "file-access|\(path)|\(from.rawValue)|\(to.rawValue)"
         case let .fileKindChanged(path, from, to): return "file-kind|\(path)|\(from.rawValue)|\(to.rawValue)"
         case let .fileSecretsFlagChanged(path, to): return "file-secrets|\(path)|\(to)"
+        case let .patternAdded(g): return "pattern+|\(g.pattern)|\(g.kind.rawValue)|\(g.access.rawValue)|\(g.readsSecrets)"
+        case let .patternRemoved(g): return "pattern-|\(g.pattern)|\(g.kind.rawValue)|\(g.access.rawValue)|\(g.readsSecrets)"
+        case let .patternAccessChanged(pattern, kind, from, to): return "pattern-access|\(pattern)|\(kind.rawValue)|\(from.rawValue)|\(to.rawValue)"
+        case let .patternSecretsFlagChanged(pattern, kind, to): return "pattern-secrets|\(pattern)|\(kind.rawValue)|\(to)"
         case let .execAdded(g): return "exec+|\(g.path)|\(g.sha256 ?? "-")"
         case let .execRemoved(g): return "exec-|\(g.path)|\(g.sha256 ?? "-")"
         case let .execHashChanged(path, from, to): return "exec-hash|\(path)|\(from ?? "-")|\(to ?? "-")"
@@ -144,6 +174,9 @@ public struct PolicyDiff: Hashable, Sendable {
             return "\(base) \(g.path)" + (g.readsSecrets ? "（允许读取凭证）" : "")
         }
         func access(_ a: Access) -> String { a == .readWrite ? "读写" : "只读" }
+        func patternLabel(_ k: PathKind, _ a: Access?) -> String {
+            (a.map(access) ?? "") + (k == .directory ? "通配目录（含其下内容）" : "通配文件")
+        }
         func kind(_ k: PathKind) -> String { k == .directory ? "目录" : "文件" }
         func toggle(_ t: Toggle) -> String { t == .allowed ? "允许" : "禁止" }
         func mode(_ m: Mode) -> String {
@@ -160,6 +193,10 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .fileAccessChanged(path, from, to): return "~ \(path)：\(access(from)) → \(access(to))"
         case let .fileKindChanged(path, from, to): return "~ \(path)：\(kind(from)) → \(kind(to))"
         case let .fileSecretsFlagChanged(path, to): return "~ \(path)：" + (to ? "标记为凭证" : "取消凭证标记")
+        case let .patternAdded(g): return "+ \(patternLabel(g.kind, g.access)) \(g.pattern)" + (g.readsSecrets ? "（允许读取凭证）" : "")
+        case let .patternRemoved(g): return "- \(patternLabel(g.kind, g.access)) \(g.pattern)"
+        case let .patternAccessChanged(pattern, kind, from, to): return "~ \(patternLabel(kind, nil)) \(pattern)：\(access(from)) → \(access(to))"
+        case let .patternSecretsFlagChanged(pattern, kind, to): return "~ \(patternLabel(kind, nil)) \(pattern)：" + (to ? "标记为凭证" : "取消凭证标记")
         // A recorded hash is not checked when the program runs, so it is never presented as a restriction.
         case let .execAdded(g): return "+ 可执行 \(g.path)"
         case let .execRemoved(g): return "- 可执行 \(g.path)"

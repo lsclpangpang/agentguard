@@ -70,6 +70,7 @@ public struct SuggestionEngine: Sendable {
     public func pendingItems(observations: [Observation], policy: EffectivePolicy, enabledTemplates: Set<String>) -> [PendingItem] {
         let identity = AliasResolver(aliases: [:])
         let granted = policy.files.compactMap { g in (try? CanonicalPath(g.path, resolver: identity)).map { PathGrant(path: $0, kind: g.kind, access: g.access) } }
+        let patterns = policy.patterns.compactMap { g in (try? PathPattern(g.pattern, resolver: identity)).map { (pattern: $0, grant: g) } }
         let grantedExec = Set(policy.exec.map(\.path))
         let folded = foldedPrefixes.compactMap { try? CanonicalPath($0, resolver: identity) }
         let candidates = templates.filter { !enabledTemplates.contains($0.id) }.sorted { $0.id < $1.id }
@@ -87,6 +88,11 @@ public struct SuggestionEngine: Sendable {
                 guard let path = try? CanonicalPath(raw, resolver: resolver) else { continue }
                 if folded.contains(where: { $0.contains(path, caseInsensitive: caseInsensitive) }) { continue }
                 if covers(granted, path, write: write) { continue }
+                if patterns.contains(where: { entry in
+                    (!write || entry.grant.access == .readWrite) && (entry.grant.kind == .directory
+                        ? entry.pattern.mayCover(path, caseInsensitive: caseInsensitive)
+                        : entry.pattern.matches(path, caseInsensitive: caseInsensitive))
+                }) { continue }
                 if let template = candidates.first(where: { covers(grants(of: $0), path, write: write) }) {
                     templateEvidence[template.id, default: (0, [])].count += observation.count
                     templateEvidence[template.id]?.samples.insert(path.value)

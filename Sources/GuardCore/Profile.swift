@@ -32,19 +32,34 @@ public struct FileGrant: Codable, Hashable, Sendable {
     public var access: Access
     public var readsSecrets: Bool
     public var expiresAt: Date?
+    /// `path` is a `PathPattern`: `*`, `?` and `**` are wildcards. A file-kind pattern grants the
+    /// matching paths; a directory-kind pattern also everything below them.
+    public var pattern: Bool
 
-    public init(path: String, kind: PathKind, access: Access, readsSecrets: Bool = false, expiresAt: Date? = nil) {
+    public init(path: String, kind: PathKind, access: Access, readsSecrets: Bool = false, expiresAt: Date? = nil, pattern: Bool = false) {
         self.path = path
         self.kind = kind
         self.access = access
         self.readsSecrets = readsSecrets
         self.expiresAt = expiresAt
+        self.pattern = pattern
     }
 
     enum CodingKeys: String, CodingKey {
-        case path, kind, access
+        case path, kind, access, pattern
         case readsSecrets = "reads_secrets"
         case expiresAt = "expires_at"
+    }
+
+    /// `pattern` is written only when set, so existing profiles encode exactly as before.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(path, forKey: .path)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(access, forKey: .access)
+        try c.encode(readsSecrets, forKey: .readsSecrets)
+        try c.encodeIfPresent(expiresAt, forKey: .expiresAt)
+        if pattern { try c.encode(true, forKey: .pattern) }
     }
 
     public init(from decoder: any Decoder) throws {
@@ -54,6 +69,7 @@ public struct FileGrant: Codable, Hashable, Sendable {
         access = try c.decode(Access.self, forKey: .access)
         readsSecrets = try c.decodeIfPresent(Bool.self, forKey: .readsSecrets) ?? false
         expiresAt = try c.decodeIfPresent(Date.self, forKey: .expiresAt)
+        pattern = try c.decodeIfPresent(Bool.self, forKey: .pattern) ?? false
     }
 }
 

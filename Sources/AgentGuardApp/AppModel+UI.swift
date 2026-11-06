@@ -38,6 +38,11 @@ extension AppModel {
     }
 
     func removeFile(_ grant: FileGrant, from id: String) {
+        // Legacy rules are compared with literal paths; a pattern's reach is shown by the sandbox check instead.
+        guard !grant.pattern else {
+            edit(id) { profile in profile.files.removeAll { $0 == grant } }
+            return
+        }
         guard let profile = profile(id), let legacy = legacyRevocation(grant.path, keeping: nil, in: profile) else { return }
         edit(id, warnings: Self.legacyWarnings(legacy, path: grant.path, revoked: "访问")) { profile in
             profile.files.removeAll { $0 == grant }
@@ -72,7 +77,7 @@ extension AppModel {
             let files = try FileGrantMerger.changingAccess(of: grant, to: access, in: profile.files,
                                                            resolver: config.environment.resolver,
                                                            caseInsensitive: config.environment.caseInsensitive)
-            guard access == .readOnly else {
+            guard access == .readOnly, !grant.pattern else {
                 edit(id, unchangedHint: hint) { $0.files = files }
                 return
             }
@@ -83,6 +88,27 @@ extension AppModel {
             }
         } catch {
             lastError = "没有保存：" + ((error as? PathError)?.displayText ?? String(describing: error))
+        }
+    }
+
+    /// Adds a wildcard grant such as `~/.claude*.jsonl`. Returns the message to show in the sheet when
+    /// the text is not a usable pattern, so the sheet stays open with the input intact.
+    func addPattern(_ text: String, kind: PathKind, access: Access, to id: String) -> String? {
+        let expanded = text == "~" ? config.home : text.hasPrefix("~/") ? config.home + text.dropFirst(1) : text
+        let environment = config.environment
+        do {
+            let pattern = try PathPattern(expanded, resolver: environment.resolver)
+            try pattern.validateBreadth(home: try CanonicalPath(config.home, resolver: environment.resolver), caseInsensitive: environment.caseInsensitive)
+            let sensitive = SensitivePaths(home: config.home).overlapsSensitive(pattern, kind: kind, caseInsensitive: environment.caseInsensitive)
+            let grant = FileGrant(path: expanded, kind: kind, access: access, readsSecrets: sensitive, pattern: true)
+            edit(id) { profile in profile.files = normalizedFileGrants(profile.files + [grant]) }
+            return nil
+        } catch let error as PatternError {
+            return error.displayText
+        } catch let error as PathError {
+            return error.displayText
+        } catch {
+            return String(describing: error)
         }
     }
 

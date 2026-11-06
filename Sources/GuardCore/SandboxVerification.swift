@@ -82,6 +82,15 @@ public enum SandboxVerification {
                                                  failure: "设为仅查看的 \(grant.path) 仍可写入，可能来自旧规则或其他重叠授权"))
             }
         }
+        for grant in policy.patterns {
+            let target = grant.kind == .directory ? child(of: grant.sample) : grant.sample
+            result.append(SandboxExpectation(operation: .fileRead, target: target, allowed: true,
+                                             failure: "通配授权 \(grant.pattern) 匹配的 \(grant.sample) 不能读取"))
+            result.append(SandboxExpectation(operation: .fileWrite, target: target, allowed: grant.access == .readWrite,
+                                             failure: grant.access == .readWrite
+                                                ? "通配授权 \(grant.pattern) 匹配的 \(grant.sample) 不能写入"
+                                                : "设为仅查看的通配授权 \(grant.pattern) 仍可写入，可能来自旧规则或其他重叠授权"))
+        }
         return result
     }
 

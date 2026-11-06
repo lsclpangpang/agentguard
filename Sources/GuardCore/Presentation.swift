@@ -57,6 +57,8 @@ extension CompileError {
             return "\(path) 落在受管程序可写的目录里，程序可以替换它，所以不能直接放行执行。请改为放行不可写位置的程序"
         case let .invalidLaunchLabel(label):
             return "启动项标签无效：\(label)"
+        case let .invalidPattern(text, error):
+            return "\(text) 不是可用的通配路径：\(error.displayText)"
         }
     }
 }
@@ -123,5 +125,16 @@ public enum AgentGuardVersion {
         let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
         let build = info?["CFBundleVersion"] as? String
         return build.map { "\(version) (\($0))" } ?? version
+    }
+}
+
+extension PatternError {
+    public var displayText: String {
+        switch self {
+        case let .path(error): return error.displayText
+        case .noWildcard: return "没有通配符，请按普通路径添加"
+        case let .invalidComponent(component): return "“\(component)”无效：** 只能单独作为一级目录，路径里不能有引号或换行"
+        case .tooBroad: return "通配符紧跟在根目录或主目录下，会放开那里的几乎所有内容，请写得更具体，例如 ~/.claude*.jsonl"
+        }
     }
 }

@@ -176,9 +176,11 @@ private struct PendingCard: View {
 }
 
 private struct FilesCard: View {
+    @State private var addingPattern = false
+
     /// Legacy rules that keep a read-only grant (or part of it) writable: they are rendered after it.
     private func legacyWriters(_ grant: FileGrant, _ legacy: LegacyRuleAnalysis) -> [String] {
-        guard grant.access == .readOnly,
+        guard grant.access == .readOnly, !grant.pattern,
               let path = try? CanonicalPath(grant.path, resolver: model.config.environment.resolver) else { return [] }
         return legacy.rulesAbove(path, access: .readWrite) + legacy.rulesWithin(path, access: .readWrite)
     }
@@ -192,6 +194,8 @@ private struct FilesCard: View {
             Menu {
                 Button("只读…") { model.addFolder(to: profile.id, access: .readOnly) }
                 Button("读写…") { model.addFolder(to: profile.id, access: .readWrite) }
+                Divider()
+                Button("通配路径…") { addingPattern = true }
             } label: {
                 Label("添加", systemImage: "plus")
             }
@@ -213,6 +217,10 @@ private struct FilesCard: View {
                 }
             }
         }
+        .sheet(isPresented: $addingPattern) {
+            AddPatternSheet(profileID: profile.id) { addingPattern = false }
+                .environmentObject(model)
+        }
     }
 }
 
@@ -227,12 +235,16 @@ private struct FileRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            IconTile(systemImage: grant.kind == .directory ? "folder.fill" : "doc.fill",
+            IconTile(systemImage: grant.pattern ? "asterisk" : grant.kind == .directory ? "folder.fill" : "doc.fill",
                      tint: grant.access == .readWrite ? .orange : .blue)
             PathLabel(path: grant.path)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)
             HStack(spacing: 6) {
+                if grant.pattern {
+                    Chip(text: grant.kind == .directory ? "通配·含子内容" : "通配")
+                        .help("* 匹配一级名称中的任意字符，? 匹配一个字符，** 匹配任意层目录")
+                }
                 if grant.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
                 if !legacyWriters.isEmpty {
                     Chip(text: "旧规则仍可写入", systemImage: "exclamationmark.triangle.fill", tint: .orange)
@@ -346,6 +358,59 @@ private struct ManagedProgramsCard: View {
             AddProgramSheet(profileID: profile.id) { adding = false }
                 .environmentObject(model)
         }
+    }
+}
+
+private struct AddPatternSheet: View {
+    @EnvironmentObject var model: AppModel
+    let profileID: String
+    let dismiss: () -> Void
+    @State private var text = ""
+    @State private var access: Access = .readOnly
+    @State private var includesContents = false
+    @State private var error: String?
+
+    private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private func submit() {
+        guard !trimmed.isEmpty else { return }
+        error = model.addPattern(trimmed, kind: includesContents ? .directory : .file, access: access, to: profileID)
+        if error == nil { dismiss() }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("添加通配路径").font(.headline)
+            Text("* 匹配一级名称里的任意字符，? 匹配一个字符，单独一级的 ** 匹配任意层目录。例如 ~/.claude*.jsonl、~/.claude/projects/**/*.jsonl。")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("~/.claude*.jsonl", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(submit)
+                .onChange(of: text) { error = nil }
+            Picker("访问", selection: $access) {
+                Text("仅查看").tag(Access.readOnly)
+                Text("允许修改").tag(Access.readWrite)
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 240)
+            Toggle("匹配到目录时，也放行其中的全部内容", isOn: $includesContents)
+            if let error {
+                Label(error, systemImage: "exclamationmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("添加", action: submit)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmed.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
     }
 }
 
