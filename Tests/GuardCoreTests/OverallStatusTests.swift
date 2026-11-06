@@ -32,7 +32,7 @@ import Testing
         detached.detachedInstances = 1
         let s = OverallStatus.evaluate(objects: [detached], collector: healthy)
         #expect(s.level == .attention)
-        #expect(s.reasons == ["knodo：已脱离 launchd 看护"])
+        #expect(s.reasons == ["knodo：启动入口已退出，程序异常后可能不会自动重启"])
     }
 
     @Test func staleStatusIsNeverAllGood() {
@@ -48,8 +48,16 @@ import Testing
         #expect(StatusFreshness.evaluate(confirmedAt: nil, now: t) == .stale(confirmedAt: nil))
     }
 
-    @Test func unknownProtectionIsAttention() {
-        #expect(OverallStatus.evaluate(objects: [object(.unknown)], collector: healthy).level == .attention)
+    @Test func unknownProtectionIsExplainedByItsRevision() {
+        let s = OverallStatus.evaluate(objects: [object(.unknown, revision: .awaitingVerification)], collector: healthy)
+        #expect(s.level == .attention)
+        #expect(s.reasons == ["knodo：正在确认保护"])
+    }
+
+    @Test func untrackedCopiesNeedAttention() {
+        var o = object()
+        o.untrackedInstances = 1
+        #expect(OverallStatus.evaluate(objects: [o], collector: healthy).reasons == ["knodo：暂时无法确认所有运行副本的保护状态"])
     }
 
     @Test func incompleteRevisionIsAttention() {
@@ -61,9 +69,10 @@ import Testing
         #expect(OverallStatus.evaluate(objects: [object(revision: .verificationFailed)], collector: healthy).level == .problem)
     }
 
-    @Test func pendingItemsAndLearningAreAttention() {
+    @Test func pendingItemsAreAttentionButRecordingMoreIsNot() {
         #expect(OverallStatus.evaluate(objects: [object(pending: 3)], collector: healthy).level == .attention)
-        #expect(OverallStatus.evaluate(objects: [object(.restrictedLearning)], collector: healthy).level == .attention)
+        // Recording more activity still blocks whatever is not allowed.
+        #expect(OverallStatus.evaluate(objects: [object(.restrictedLearning)], collector: healthy) == .allGood)
     }
 
     @Test func worstLevelWinsAndReasonsAreCollected() {

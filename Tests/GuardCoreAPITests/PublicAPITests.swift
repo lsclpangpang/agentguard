@@ -18,8 +18,8 @@ import Testing
         #expect(status == .allGood)
         let unreachable = OverallStatus(level: .problem, reasons: ["无法连接 Helper"])
         #expect(unreachable.level == .problem)
-        #expect(report.profiles.first?.revisionState.displayText == "已生效")
-        #expect(Mode.restrictedLearning.displayName == "受限学习")
+        #expect(report.profiles.first?.revisionState.displayText == "当前权限已生效")
+        #expect(Mode.restrictedLearning.displayName == "保护中 · 记录更多活动")
 
         let detached = ProfileStatusReport(profileID: "knodo", savedRevision: 2, mode: .enforce, revisionState: .applied(running: true),
                                            runningInstances: [1], pendingCount: 0, detachedInstances: [1])

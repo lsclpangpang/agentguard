@@ -29,15 +29,18 @@ public struct ObjectStatus: Equatable, Sendable {
     public var pendingItems: Int
     public var unmanagedInstances: Int
     public var detachedInstances: Int
+    /// Running instances whose process tree is not fully known.
+    public var untrackedInstances: Int
 
     public init(profileID: String, protection: ProtectionState, revision: RevisionState, pendingItems: Int, unmanagedInstances: Int,
-                detachedInstances: Int = 0) {
+                detachedInstances: Int = 0, untrackedInstances: Int = 0) {
         self.profileID = profileID
         self.protection = protection
         self.revision = revision
         self.pendingItems = pendingItems
         self.unmanagedInstances = unmanagedInstances
         self.detachedInstances = detachedInstances
+        self.untrackedInstances = untrackedInstances
     }
 }
 
@@ -81,24 +84,28 @@ public struct OverallStatus: Equatable, Sendable {
     public static func evaluate(objects: [ObjectStatus], collector: CollectorHealth, freshness: StatusFreshness = .current) -> OverallStatus {
         var findings: [(StatusLevel, String)] = []
         if freshness.isStale { findings.append((.attention, "状态待确认：最近没有收到 Helper 的确认")) }
-        if !collector.isHealthy { findings.append((.attention, "采集器状态异常")) }
+        // Missing activity records affect what is listed, not whether the limits hold.
+        if !collector.isHealthy { findings.append((.attention, "部分活动记录缺失：被阻止的访问可能没有全部列出")) }
         for object in objects {
             let name = object.profileID
             switch object.protection {
-            case .enforced, .stopped: break
-            case .restrictedLearning: findings.append((.attention, "\(name)：受限学习中"))
+            // Recording more activity still blocks everything not allowed.
+            case .enforced, .stopped, .restrictedLearning: break
             case .unprotectedObserve: findings.append((.problem, "\(name)：保护未启用"))
-            case .unknown: findings.append((.attention, "\(name)：保护状态未知"))
+            case .unknown: break
             }
-            if object.unmanagedInstances > 0 { findings.append((.problem, "\(name)：发现 \(object.unmanagedInstances) 个未受管实例")) }
-            if object.detachedInstances > 0 { findings.append((.attention, "\(name)：已脱离 launchd 看护")) }
+            if object.unmanagedInstances > 0 { findings.append((.problem, "\(name)：\(object.unmanagedInstances) 个副本没有经过 AgentGuard 运行，不受保护")) }
+            if object.detachedInstances > 0 { findings.append((.attention, "\(name)：启动入口已退出，程序异常后可能不会自动重启")) }
+            if object.untrackedInstances > 0 { findings.append((.attention, "\(name)：暂时无法确认所有运行副本的保护状态")) }
             switch object.revision {
             case .applied: break
-            case .verificationFailed: findings.append((.problem, "\(name)：验收失败"))
-            case .inconsistent: findings.append((.problem, "\(name)：运行修订与已保存修订不一致"))
-            case .oldInstancesAlive, .unconfirmed, .awaitingVerification: findings.append((.attention, "\(name)：修订尚未生效"))
+            case .verificationFailed: findings.append((.problem, "\(name)：保护未通过确认"))
+            case .inconsistent: findings.append((.problem, "\(name)：运行中的权限与保存的不一致"))
+            case .oldInstancesAlive: findings.append((.attention, "\(name)：新权限已保存，重启后生效"))
+            case .unconfirmed: findings.append((.attention, "\(name)：暂时无法确认旧副本是否已退出"))
+            case .awaitingVerification: findings.append((.attention, "\(name)：正在确认保护"))
             }
-            if object.pendingItems > 0 { findings.append((.attention, "\(name)：\(object.pendingItems) 个待定项")) }
+            if object.pendingItems > 0 { findings.append((.attention, "\(name)：\(object.pendingItems) 项活动需要处理")) }
         }
         guard let worst = findings.map(\.0).max() else { return .allGood }
         return OverallStatus(level: worst, reasons: findings.map(\.1))
