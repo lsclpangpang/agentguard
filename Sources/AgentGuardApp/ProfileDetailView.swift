@@ -83,22 +83,14 @@ private struct ProfileHeader: View {
                     }
                 }
                 if let command = model.command(for: profile) {
-                    HStack(spacing: 8) {
-                        Text(command).font(.system(.callout, design: .monospaced))
-                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
-                        Button {
-                            Pasteboard.copy(command)
-                            copied = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-                        } label: {
-                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    if profile.launch != nil {
+                        DisclosureGroup("终端启动命令") {
+                            commandView(command).padding(.top, 4)
                         }
-                        .buttonStyle(.borderless)
-                        .help("复制命令：在终端中粘贴即可在这份权限下运行")
+                        .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        commandView(command)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
                 } else if profile.launch == nil {
                     Text("在“受管程序”中指定程序后，这里会给出可以直接复制运行的完整命令。")
                         .font(.callout).foregroundStyle(.secondary)
@@ -112,7 +104,26 @@ private struct ProfileHeader: View {
         ProgramStatusSummary.evaluate(status, freshness: model.freshness, programName: profile.id, hasLaunch: profile.launch != nil)
     }
 
-    private var tint: Color { Theme.color(summary.level) }
+    private var tint: Color { Theme.color(summary.headlineLevel) }
+
+    private func commandView(_ command: String) -> some View {
+        HStack(spacing: 8) {
+            Text(command).font(.system(.callout, design: .monospaced))
+                .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+            Button {
+                Pasteboard.copy(command)
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .help("复制命令：在终端中粘贴即可在这份权限下运行")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+    }
 }
 
 /// What is happening, what it means and what to do, with the one action that resolves it.
@@ -124,28 +135,48 @@ private struct StatusCard: View {
 
     var body: some View {
         let summary = ProgramStatusSummary.evaluate(status, freshness: model.freshness, programName: profile.id, hasLaunch: profile.launch != nil)
-        Card(title: summary.headline, systemImage: Theme.symbol(summary.level)) {
+        Card(title: summary.headline, systemImage: Theme.symbol(summary.headlineLevel),
+             iconTint: Theme.color(summary.headlineLevel)) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(summary.impact).font(.callout).fixedSize(horizontal: false, vertical: true)
-                ForEach(status?.runtimeInstances ?? [], id: \.id) { instance in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("运行副本 #\(instance.id) · 修订 \(instance.revision) · 已知 PID \(instance.knownPIDs.map(String.init).joined(separator: "、"))")
-                            .font(.caption).textSelection(.enabled)
-                        if let pid = instance.checkedPID {
-                            Text("最近核验的代表进程：PID \(pid)").font(.caption).foregroundStyle(.secondary)
+                if summary.next != nil || (status?.pendingCount ?? 0) > 0 {
+                    HStack(spacing: 10) {
+                        if let next = summary.next { action(next) }
+                        if let pending = status?.pendingCount, pending > 0 {
+                            Button("查看 \(pending) 项需要处理的活动") { showTab(.activity) }
                         }
                     }
+                    .disabled(!model.helperReachable || model.restartingProfiles.contains(profile.id))
                 }
-                if let confirmed = model.statusConfirmedAt {
-                    Text("最近确认：\(confirmed.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(.secondary)
-                }
-                HStack(spacing: 10) {
-                    if let next = summary.next { action(next) }
-                    if let pending = status?.pendingCount, pending > 0 {
-                        Button("查看 \(pending) 项需要处理的活动") { showTab(.activity) }
+                DisclosureGroup("运行详情") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(status?.runtimeInstances ?? [], id: \.id) { instance in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("运行副本 #\(instance.id) · 修订 \(instance.revision) · 已知 PID \(instance.knownPIDs.map(String.init).joined(separator: "、"))")
+                                if let pid = instance.checkedPID {
+                                    Text("最近核验的代表进程：PID \(String(pid))")
+                                }
+                            }
+                        }
+                        if let confirmed = model.statusConfirmedAt {
+                            Text("最近确认：\(confirmed.formatted(date: .omitted, time: .standard))")
+                        }
+                        if let deferred = status?.verificationDeferred, !deferred.isEmpty {
+                            Text("等待授权路径出现（无需处理）").fontWeight(.medium)
+                            Text("以下路径目前不存在，出现后会自动检查，无需手工创建。")
+                            ForEach(deferred, id: \.self) { Text($0) }
+                        }
+                        if summary.next == nil {
+                            Button("重新检查状态") { model.refresh() }
+                                .disabled(!model.helperReachable || model.restartingProfiles.contains(profile.id))
+                        }
                     }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .padding(.top, 6)
                 }
-                .disabled(!model.helperReachable || model.restartingProfiles.contains(profile.id))
+                .font(.callout)
             }
         }
     }
@@ -179,8 +210,7 @@ private struct TrustNotices: View {
         let legacy = model.legacyAnalysis(profile)
         let issues = status?.verificationIssues ?? []
         let pending = status?.verificationPending ?? []
-        let deferred = status?.verificationDeferred ?? []
-        if !issues.isEmpty || !pending.isEmpty || !deferred.isEmpty || legacy.hasUnverifiedFileRules || !(status?.untrackedInstances.isEmpty ?? true) {
+        if !issues.isEmpty || !pending.isEmpty || legacy.hasUnverifiedFileRules || !(status?.untrackedInstances.isEmpty ?? true) {
             VStack(alignment: .leading, spacing: 8) {
                 if !issues.isEmpty {
                     Notice(kind: .error, text: "权限核验发现以下差异。访问也可能受到 macOS 或程序自身的其他限制：\n" + issues.joined(separator: "\n"))
@@ -188,20 +218,55 @@ private struct TrustNotices: View {
                 if !pending.isEmpty {
                     Notice(kind: .warning, text: "部分权限暂时无法核验，系统会自动重新检查：\n" + pending.joined(separator: "\n"))
                 }
-                if let historical = status?.historicalTrackingGaps, !historical.isEmpty {
-                    Notice(kind: .warning, text: "历史跟踪记录不完整：副本 #\(historical.map(String.init).joined(separator: "、#")) 的已知进程已退出，但此前遗漏的子进程是否退出仍无法确认。\n重新检查或重启当前程序不能补回历史记录。下次重启 Mac 后，这些旧记录会自动清理。")
-                }
-                if let active = status?.activeTrackingGaps, !active.isEmpty {
-                    Notice(kind: .warning, text: "当前副本的子进程记录不完整：副本 #\(active.map(String.init).joined(separator: "、#")) 在后台服务重启或活动记录中断前启动的子进程可能没有被完整跟踪。\n上方核验只针对已知副本，不代表全部子进程都已确认。重启程序也不能证明遗漏的旧子进程已经退出；下次重启 Mac 后会重新建立跟踪。")
-                }
-                if !deferred.isEmpty {
-                    Notice(kind: .info, text: "等待授权路径出现：这些路径目前不存在，出现后会自动检查，无需手工创建。\n" + deferred.joined(separator: "\n"))
+                if let status, !status.untrackedInstances.isEmpty {
+                    TrackingGapNotice(status: status)
                 }
                 if legacy.hasUnverifiedFileRules {
                     Notice(kind: .warning, text: "存在 \(legacy.unverified.count) 条尚未核对的旧规则，它们可能放开权限页没有列出的访问。详见“高级”。")
                 }
             }
         }
+    }
+}
+
+/// Keep uncertainty visible once; the instance history is available on demand.
+private struct TrackingGapNotice: View {
+    let status: ProfileStatusReport
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                if !status.historicalTrackingGaps.isEmpty {
+                    Text("历史副本 #\(status.historicalTrackingGaps.map(String.init).joined(separator: "、#"))：已知进程已退出，但此前遗漏的子进程是否退出仍无法确认。")
+                }
+                if !status.activeTrackingGaps.isEmpty {
+                    Text("当前副本 #\(status.activeTrackingGaps.map(String.init).joined(separator: "、#"))：后台服务重启或活动记录中断前启动的子进程，可能没有被完整跟踪。")
+                }
+                Text("当前核验只针对已知副本，不能据此确认所有旧权限已收回。重新检查或重启程序无法补回遗漏的历史；下次正常重启 Mac 后会清理旧记录并重新建立跟踪。")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 8)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("部分子进程记录不完整").font(.callout.weight(.medium))
+                    Text("部分旧子进程是否退出仍待确认。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Button(expanded ? "收起" : "查看详情") { expanded.toggle() }
+                    .font(.caption).buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.orange.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.orange.opacity(0.25)))
     }
 }
 

@@ -87,6 +87,7 @@ import Testing
         report.mode = .unprotectedObserve
         let s = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
         #expect(s.level == .problem && s.headline == "运行中 · 没有保护")
+        #expect(s.headlineLevel == .problem)
         var stopped = status(.applied(running: false))
         stopped.mode = .unprotectedObserve
         stopped.runningInstances = []
@@ -96,18 +97,21 @@ import Testing
     @Test func staleIsNeverGreen() {
         let s = ProgramStatusSummary.evaluate(status(.applied(running: true)), freshness: .stale(confirmedAt: nil), programName: "Knodo", hasLaunch: true)
         #expect(s.headline == "状态待确认" && s.level == .attention)
+        #expect(s.headlineLevel == .attention)
     }
 
     @Test func untrackedCopiesAreNotClaimedProtected() {
         let s = ProgramStatusSummary.evaluate(status(.applied(running: true), untracked: [1]), freshness: .current, programName: "Knodo", hasLaunch: true)
-        #expect(s.level == .attention && s.next == .checkAndRecover)
-        #expect(s.impact.contains("不代表所有旧权限已经收回"))
+        #expect(s.level == .attention)
+        #expect(s.headlineLevel == .allGood)
+        #expect(s.next == nil)
     }
 
     @Test func unmanagedCopiesAreAProblem() {
         let s = ProgramStatusSummary.evaluate(status(.applied(running: true), unmanaged: [9]), freshness: .current, programName: "Knodo", hasLaunch: true)
         #expect(s.level == .problem && s.next == .stopUnmanaged)
-        #expect(s.headline == "运行中 · 当前副本的权限检查已通过")
+        #expect(s.headline == "运行中 · 有副本未受保护")
+        #expect(s.headlineLevel == .problem)
     }
 
     @Test func missingPathsArePendingAndDoNotRecommendRestart() {
@@ -115,6 +119,7 @@ import Testing
         report.verificationPending = ["路径暂不存在，尚未核验：/tmp/transient.lock"]
         let s = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
         #expect(s.headline == "部分权限暂未确认" && s.level == .attention)
+        #expect(s.headlineLevel == .attention)
         #expect(s.next == .checkAndRecover)
         #expect(s.impact.contains("自动重新检查"))
     }
@@ -125,11 +130,14 @@ import Testing
         report.runningInstances = [4]
         report.verificationDeferred = ["/tmp/transient.lock"]
         let s = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
-        #expect(s.headline == "运行中 · 当前副本的权限检查已通过")
-        #expect(s.level == .attention && s.next == .checkAndRecover)
-        #expect(s.impact.contains("跟踪记录不完整"))
-        #expect(s.impact.contains("出现后自动补查"))
+        #expect(s.headline == "运行中 · 权限检查通过")
+        #expect(s.level == .attention && s.headlineLevel == .allGood)
+        #expect(s.next == nil)
+        #expect(report.historicalTrackingGaps == [1])
+        #expect(!report.revisionState.isComplete)
         report.runtimeRevisionState = .verificationFailed
-        #expect(ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true).level == .problem)
+        let failed = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
+        #expect(failed.level == .problem && failed.headlineLevel == .problem)
+        #expect(failed.next == .checkAndRecover)
     }
 }

@@ -118,13 +118,17 @@ public struct ProgramStatusSummary: Equatable, Sendable {
     public var headline: String
     public var impact: String
     public var next: Next?
+    /// Overall attention, including incomplete lifecycle history.
     public var level: StatusLevel
+    /// Color of the current-runtime headline. Historical gaps are shown separately.
+    public var headlineLevel: StatusLevel
 
     public init(headline: String, impact: String, next: Next?, level: StatusLevel) {
         self.headline = headline
         self.impact = impact
         self.next = next
         self.level = level
+        self.headlineLevel = level
     }
 
     public static func evaluate(_ status: ProfileStatusReport?, freshness: StatusFreshness, programName: String, hasLaunch: Bool) -> ProgramStatusSummary {
@@ -142,8 +146,8 @@ public struct ProgramStatusSummary: Equatable, Sendable {
         var summary: ProgramStatusSummary
         switch status.runtimeRevisionState ?? status.revisionState {
         case .applied(running: true):
-            summary = ProgramStatusSummary(headline: "运行中 · 当前副本的权限检查已通过",
-                                           impact: "已核对当前已知副本使用的权限修订和可检查的访问限制。", next: nil, level: .allGood)
+            summary = ProgramStatusSummary(headline: "运行中 · 权限检查通过",
+                                           impact: "当前已知副本的可检查权限符合已保存的设置。", next: nil, level: .allGood)
         case .applied(running: false):
             summary = ProgramStatusSummary(headline: status.untrackedInstances.isEmpty ? "未运行" : "未发现仍在运行的已知进程",
                                            impact: "启动后按下面的权限运行。", next: hasLaunch ? .start : nil, level: .allGood)
@@ -167,16 +171,15 @@ public struct ProgramStatusSummary: Equatable, Sendable {
                                            next: .restart, level: .problem)
         }
         if !status.untrackedInstances.isEmpty {
-            summary.impact += " 另有子进程跟踪记录不完整，详见下方；当前检查通过不代表所有旧权限已经收回。"
             if summary.level == .allGood { summary.level = .attention }
-            if summary.next == nil { summary.next = .checkAndRecover }
-        }
-        if !status.verificationDeferred.isEmpty {
-            summary.impact += " 尚未出现的授权路径会在出现后自动补查。"
         }
         if !status.unmanagedProcesses.isEmpty {
             summary.impact += " 另有 \(status.unmanagedProcesses.count) 个副本没有经过 AgentGuard 运行，不受保护。"
             summary.level = .problem
+            summary.headlineLevel = .problem
+            if (status.runtimeRevisionState ?? status.revisionState) == .applied(running: true) {
+                summary.headline = "运行中 · 有副本未受保护"
+            }
             if summary.next == nil { summary.next = .stopUnmanaged }
         }
         return summary

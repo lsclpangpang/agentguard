@@ -243,11 +243,14 @@ private struct SidebarRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            IconTile(systemImage: "app.badge.checkmark", tint: Theme.color(summary.level), size: 24)
+            IconTile(systemImage: "app.badge.checkmark", tint: Theme.color(summary.headlineLevel), size: 24)
             VStack(alignment: .leading, spacing: 1) {
-                Text(profile.profileID)
+                HStack(spacing: 6) {
+                    Text(profile.profileID)
+                    if !profile.untrackedInstances.isEmpty { TrackingGapIndicator() }
+                }
                 HStack(spacing: 4) {
-                    Circle().fill(Theme.color(summary.level)).frame(width: 6, height: 6)
+                    Circle().fill(Theme.color(summary.headlineLevel)).frame(width: 6, height: 6)
                     Text(summary.headline).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }

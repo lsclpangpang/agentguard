@@ -186,11 +186,14 @@ private struct MenuProfileRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            IconTile(systemImage: "app.badge.checkmark", tint: Theme.color(summary.level), size: 28)
+            IconTile(systemImage: "app.badge.checkmark", tint: Theme.color(summary.headlineLevel), size: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(profile.profileID).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(profile.profileID).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    if !profile.untrackedInstances.isEmpty { TrackingGapIndicator() }
+                }
                 HStack(spacing: 5) {
-                    Circle().fill(Theme.color(summary.level)).frame(width: 6, height: 6)
+                    Circle().fill(Theme.color(summary.headlineLevel)).frame(width: 6, height: 6)
                     Text(summary.headline).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
