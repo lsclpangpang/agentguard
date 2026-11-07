@@ -6,7 +6,11 @@ cd "$(dirname "$0")/.."
 
 VERSION="${VERSION:-$(cat VERSION)}"
 BUILD_NUMBER="${BUILD_NUMBER:-0}"
-APP=build/AgentGuard.app
+# The bundle is staged inside a `.noindex` directory: Spotlight skips it, so Launch Services does not
+# register every intermediate build as another launchable AgentGuard. Only build/AgentGuard.zip is
+# meant to leave this directory; install by unzipping it into /Applications.
+STAGE=build/stage.noindex
+APP="$STAGE/AgentGuard.app"
 MACOS="$APP/Contents/MacOS"
 
 swift build -c release --arch arm64
@@ -41,5 +45,5 @@ sign com.lsclpangpang.agentguard.collector "$MACOS/agentguard-collector"
 sign com.lsclpangpang.agentguard "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 
-(cd build && ditto -c -k --keepParent AgentGuard.app AgentGuard.zip)
+(cd "$STAGE" && ditto -c -k --keepParent AgentGuard.app ../AgentGuard.zip)
 echo "built build/AgentGuard.zip ($VERSION build $BUILD_NUMBER)"

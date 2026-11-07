@@ -16,6 +16,7 @@ public enum HelperFailure {
         case "no_launch_settings": return "配置档没有启动设置，不能接管启动项"
         case "invalid_profile": return "配置档名称无效"
         case "profile_running": return "配置档还有运行中的实例，请先停止它再删除"
+        case "temporary_grants_unavailable": return "临时授权暂未开放：到期后收回运行中程序的权限还没有完成"
         default: return "Helper 拒绝了请求（\(code)）"
         }
     }
@@ -53,9 +54,11 @@ extension CompileError {
         case let .conflictingHashes(path):
             return "\(path) 出现了两个不同的哈希"
         case let .mutableExecutableWithoutHash(path):
-            return "\(path) 落在可写目录里，必须限定哈希才能执行"
+            return "\(path) 落在受管程序可写的目录里，程序可以替换它，所以不能直接放行执行。请改为放行不可写位置的程序"
         case let .invalidLaunchLabel(label):
             return "启动项标签无效：\(label)"
+        case let .invalidPattern(text, error):
+            return "\(text) 不是可用的通配路径：\(error.displayText)"
         }
     }
 }
@@ -73,13 +76,13 @@ extension PathError {
 extension RevisionState {
     public var displayText: String {
         switch self {
-        case .applied(running: true): return "已生效"
-        case .applied(running: false): return "已停止"
-        case let .oldInstancesAlive(residual, _): return "待生效：旧实例仍有 \(residual.count) 个进程"
-        case .unconfirmed: return "无法确认旧实例是否已退出"
-        case .awaitingVerification: return "等待验收"
-        case .verificationFailed: return "验收失败"
-        case .inconsistent: return "运行修订与已保存修订不一致"
+        case .applied(running: true): return "当前权限已生效"
+        case .applied(running: false): return "未运行"
+        case let .oldInstancesAlive(residual, _): return "运行中 · 权限待更新（旧副本还有 \(residual.count) 个进程）"
+        case .unconfirmed: return "暂时无法确认旧副本是否已退出"
+        case .awaitingVerification: return "正在确认保护"
+        case .verificationFailed: return "保护未通过确认"
+        case .inconsistent: return "运行中的权限与保存的不一致"
         }
     }
 }
@@ -87,9 +90,90 @@ extension RevisionState {
 extension Mode {
     public var displayName: String {
         switch self {
-        case .enforce: return "强制保护"
-        case .restrictedLearning: return "受限学习"
+        case .enforce: return "保护中"
+        case .restrictedLearning: return "保护中 · 记录更多活动"
         case .unprotectedObserve: return "无保护观察"
+        }
+    }
+}
+
+/// One program's state in three parts: what is happening now, what it means, and what to do.
+public struct ProgramStatusSummary: Equatable, Sendable {
+    public enum Next: Equatable, Sendable {
+        case start
+        case restartAndApply
+        case restart
+        case checkAndRecover
+        case stopUnmanaged
+    }
+
+    public var headline: String
+    public var impact: String
+    public var next: Next?
+    public var level: StatusLevel
+
+    public init(headline: String, impact: String, next: Next?, level: StatusLevel) {
+        self.headline = headline
+        self.impact = impact
+        self.next = next
+        self.level = level
+    }
+
+    public static func evaluate(_ status: ProfileStatusReport?, freshness: StatusFreshness, programName: String, hasLaunch: Bool) -> ProgramStatusSummary {
+        guard let status, !freshness.isStale else {
+            return ProgramStatusSummary(headline: "状态待确认", impact: "最近没有收到 Helper 的确认，下面显示的可能不是当前情况。",
+                                        next: .checkAndRecover, level: .attention)
+        }
+        // Unprotected observation runs under `(allow default)`: verification passing says nothing about limits.
+        if status.mode.liftsBoundary {
+            let running = !status.runningInstances.isEmpty
+            return ProgramStatusSummary(headline: running ? "运行中 · 没有保护" : "未运行 · 没有保护",
+                                        impact: "\(programName) 处于无保护观察模式，只记录不限制，下面的权限\(running ? "现在" : "启动后也")不起作用。",
+                                        next: nil, level: .problem)
+        }
+        var summary: ProgramStatusSummary
+        switch status.revisionState {
+        case .applied(running: true) where !status.untrackedInstances.isEmpty:
+            summary = ProgramStatusSummary(headline: "运行中 · 暂时无法确认所有运行副本",
+                                           impact: "Helper 重启或活动记录中断前启动的子程序可能没有被跟踪，不能确认它们都受这份权限限制。",
+                                           next: .restart, level: .attention)
+        case .applied(running: true):
+            summary = ProgramStatusSummary(headline: "运行中 · 当前权限已生效", impact: "已从外部核对，\(programName) 按下面的权限运行。", next: nil, level: .allGood)
+        case .applied(running: false):
+            summary = ProgramStatusSummary(headline: "未运行", impact: "启动后按下面的权限运行。", next: hasLaunch ? .start : nil, level: .allGood)
+        case .oldInstancesAlive:
+            summary = ProgramStatusSummary(headline: "运行中 · 权限待更新",
+                                           impact: "新权限已保存，但 \(programName) 仍在使用之前的权限。重启 \(programName) 后生效，旧权限才会收回。",
+                                           next: hasLaunch ? .restartAndApply : .restart, level: .attention)
+        case .unconfirmed:
+            summary = ProgramStatusSummary(headline: "暂时无法确认旧副本是否已退出",
+                                           impact: "活动记录中断，旧权限可能仍在被使用。", next: .checkAndRecover, level: .attention)
+        case .awaitingVerification:
+            summary = ProgramStatusSummary(headline: "正在确认保护", impact: "\(programName) 已启动，正在核对它实际受到的限制。", next: nil, level: .attention)
+        case .verificationFailed:
+            summary = ProgramStatusSummary(headline: "保护未通过确认",
+                                           impact: "运行中的 \(programName) 没有按下面的权限受到限制，原因见下方。", next: .restart, level: .problem)
+        case .inconsistent:
+            summary = ProgramStatusSummary(headline: "运行中的权限与保存的不一致", impact: "无法确认 \(programName) 当前受到的限制。",
+                                           next: .restart, level: .problem)
+        }
+        if !status.unmanagedProcesses.isEmpty {
+            summary.impact += " 另有 \(status.unmanagedProcesses.count) 个副本没有经过 AgentGuard 运行，不受保护。"
+            summary.level = .problem
+            if summary.next == nil { summary.next = .stopUnmanaged }
+        }
+        return summary
+    }
+}
+
+extension ProgramStatusSummary.Next {
+    public var title: String {
+        switch self {
+        case .start: return "启动程序"
+        case .restartAndApply: return "重启并应用"
+        case .restart: return "重启程序"
+        case .checkAndRecover: return "检查并恢复"
+        case .stopUnmanaged: return "查看未受保护的副本"
         }
     }
 }
@@ -122,5 +206,16 @@ public enum AgentGuardVersion {
         let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
         let build = info?["CFBundleVersion"] as? String
         return build.map { "\(version) (\($0))" } ?? version
+    }
+}
+
+extension PatternError {
+    public var displayText: String {
+        switch self {
+        case let .path(error): return error.displayText
+        case .noWildcard: return "没有通配符，请按普通路径添加"
+        case let .invalidComponent(component): return "“\(component)”无效：** 只能单独作为一级目录，路径里不能有引号或换行"
+        case .tooBroad: return "通配符紧跟在根目录或主目录下，会放开那里的几乎所有内容，请写得更具体，例如 ~/.claude*.jsonl"
+        }
     }
 }

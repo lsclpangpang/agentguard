@@ -88,6 +88,19 @@ public enum UserAccount {
 
 /// Process facts the Helper needs to recognise an already-running instance after a restart.
 public enum ProcessFacts {
+    /// Stable through Helper restarts, different after reboot (when no old descendants can survive).
+    public static var bootSessionID: String? {
+        #if canImport(Darwin)
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var value = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &value, &size, nil, 0) == 0 else { return nil }
+        return String(cString: value)
+        #else
+        return nil
+        #endif
+    }
+
     /// Start time in microseconds since the epoch; stable across exec, so it distinguishes a live
     /// instance from a reused PID.
     public static func startTime(pid: Int32) -> UInt64? {
@@ -115,8 +128,10 @@ public enum ProcessFacts {
             guard pid > 0, proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
             var info = proc_bsdinfo()
             let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-            let parent = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size ? Int32(bitPattern: info.pbi_ppid) : nil
-            return RunningProcess(key: ProcessKey(pid: pid, version: 0), executablePath: String(cString: buffer), parentPID: parent)
+            guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+            return RunningProcess(key: ProcessKey(pid: pid, version: 0), executablePath: String(cString: buffer),
+                                  parentPID: Int32(bitPattern: info.pbi_ppid),
+                                  startTime: UInt64(info.pbi_start_tvsec) * 1_000_000 + UInt64(info.pbi_start_tvusec))
         }
         #else
         return []

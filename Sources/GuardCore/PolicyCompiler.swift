@@ -42,6 +42,7 @@ public enum CompileError: Error, Equatable, Sendable {
     case mutableExecutableWithoutHash(String)
     /// The Helper uses the original label in root-owned file paths and launchctl calls.
     case invalidLaunchLabel(String)
+    case invalidPattern(String, PatternError)
 }
 
 public struct EffectiveFileGrant: Hashable, Sendable {
@@ -55,6 +56,27 @@ public struct EffectiveFileGrant: Hashable, Sendable {
         self.kind = kind
         self.access = access
         self.readsSecrets = readsSecrets
+    }
+}
+
+/// A wildcard file grant; `pattern` is the canonical `PathPattern.value`.
+public struct EffectivePatternGrant: Hashable, Sendable {
+    public var pattern: String
+    public var kind: PathKind
+    public var access: Access
+    public var readsSecrets: Bool
+    /// SBPL regex body covering exactly what the grant allows.
+    public var regex: String
+    /// A concrete path the pattern matches, used to probe the sandbox.
+    public var sample: String
+
+    public init(pattern: String, kind: PathKind, access: Access, readsSecrets: Bool, regex: String, sample: String) {
+        self.pattern = pattern
+        self.kind = kind
+        self.access = access
+        self.readsSecrets = readsSecrets
+        self.regex = regex
+        self.sample = sample
     }
 }
 
@@ -73,6 +95,8 @@ public struct EffectivePolicy: Hashable, Sendable {
     public var revision: Int
     public var mode: Mode
     public var files: [EffectiveFileGrant]
+    /// Wildcard grants, kept apart from `files` so nothing treats a pattern as a literal path.
+    public var patterns: [EffectivePatternGrant] = []
     public var exec: [EffectiveExecGrant]
     public var network: NetworkPolicy
     public var unrestrictedExec: Bool
@@ -85,7 +109,7 @@ public struct EffectivePolicy: Hashable, Sendable {
     /// Executables whose copies running outside AgentGuard count as unmanaged: the programs plus the
     /// launch executable.
     public var detectionTargets: [String] {
-        Array(Set(programs + (launch.map { [$0.executable] } ?? []))).sorted()
+        Array(Set(programs + (launch.map { [$0.detectionTarget] } ?? []))).sorted()
     }
 }
 
@@ -110,12 +134,14 @@ public struct PolicyCompiler: Sendable {
         let templates = try resolveTemplates(profile.templates, catalog: catalog)
         let stateDirectory = environment.stateRoot.map { $0 + "/" + profile.id }
         let stateGrant = stateDirectory.map { FileGrant(path: $0, kind: .directory, access: .readWrite) }
-        var files = try compileFiles(profile.files + templates.flatMap(\.files) + (stateGrant.map { [$0] } ?? []))
+        let allFiles = profile.files + templates.flatMap(\.files) + (stateGrant.map { [$0] } ?? [])
+        var files = try compileFiles(allFiles.filter { !$0.pattern })
         var launch = profile.launch
         if let settings = launch {
             launch?.executable = try canonical(settings.executable).value
             if let directory = settings.workingDirectory { launch?.workingDirectory = try canonical(directory).value }
             if let path = settings.originalPath { launch?.originalPath = try canonical(path).value }
+            if let path = settings.scriptPath { launch?.scriptPath = try canonical(path).value }
             if let label = settings.originalLabel, !Self.isSafeLaunchLabel(label) { throw CompileError.invalidLaunchLabel(label) }
         }
         let programs = Array(Set(try profile.programs.map { try canonical($0).value })).sorted()
@@ -131,7 +157,8 @@ public struct PolicyCompiler: Sendable {
             }
         }
         let targetExec = targets.map { ExecGrant(path: $0) }
-        let exec = try compileExec(profile.exec + templates.flatMap(\.exec) + targetExec, files: files,
+        let patterns = try compilePatterns(allFiles.filter(\.pattern), files: files)
+        let exec = try compileExec(profile.exec + templates.flatMap(\.exec) + targetExec, files: files, patterns: patterns,
                                    unrestrictedExec: profile.unrestrictedExec)
         var network = profile.network
         network.loopbackTCPConnect = try compilePorts(profile.network.loopbackTCPConnect + templates.flatMap(\.loopbackPorts))
@@ -140,6 +167,10 @@ public struct PolicyCompiler: Sendable {
             revision: profile.revision,
             mode: profile.mode,
             files: files.map { EffectiveFileGrant(path: $0.path.value, kind: $0.kind, access: $0.access, readsSecrets: $0.readsSecrets) },
+            patterns: patterns.map {
+                EffectivePatternGrant(pattern: $0.pattern.value, kind: $0.kind, access: $0.access, readsSecrets: $0.readsSecrets,
+                                      regex: $0.pattern.regex(kind: $0.kind), sample: $0.pattern.sample)
+            },
             exec: exec,
             network: network,
             unrestrictedExec: profile.unrestrictedExec,
@@ -270,7 +301,78 @@ public struct PolicyCompiler: Sendable {
         }
     }
 
-    private func compileExec(_ grants: [ExecGrant], files: [CanonicalFileGrant],
+    private struct CanonicalPatternGrant {
+        var pattern: PathPattern
+        var kind: PathKind
+        var access: Access
+        var readsSecrets: Bool
+    }
+
+    /// Wildcard grants obey the same boundaries as plain ones: nothing they may match can fall in a
+    /// protected area, a writable one may not cover a write-protected area, and a read-only one may
+    /// not sit inside a writable directory, where it would only look like a restriction.
+    private func compilePatterns(_ grants: [FileGrant], files: [CanonicalFileGrant]) throws -> [CanonicalPatternGrant] {
+        let home = try canonical(environment.homeDirectory)
+        var merged: [String: CanonicalPatternGrant] = [:]
+        for grant in grants {
+            let pattern: PathPattern
+            do {
+                pattern = try PathPattern(grant.path, resolver: environment.resolver)
+                try pattern.validateBreadth(home: home, caseInsensitive: caseInsensitive)
+            } catch let error as PatternError {
+                throw CompileError.invalidPattern(grant.path, error)
+            }
+            let key = (caseInsensitive ? pattern.value.lowercased() : pattern.value) + "|" + grant.kind.rawValue
+            var entry = merged[key] ?? CanonicalPatternGrant(pattern: pattern, kind: grant.kind, access: grant.access, readsSecrets: false)
+            entry.access = max(entry.access, grant.access)
+            entry.readsSecrets = entry.readsSecrets || grant.readsSecrets
+            merged[key] = entry
+        }
+        let result = merged.values.sorted { ($0.pattern.value, $0.kind.rawValue) < ($1.pattern.value, $1.kind.rawValue) }
+        // Like a plain grant, a pattern may not open `/` or the home directory as a whole (`/Users/*`, `/U*`).
+        let root = try canonical("/")
+        for grant in result where [root, home].contains(where: { grant.pattern.covers($0, kind: grant.kind, caseInsensitive: caseInsensitive) }) {
+            throw CompileError.forbiddenPath(grant.pattern.value)
+        }
+        let protected = try environment.protectedPaths.map(canonical)
+        let writeProtected = try environment.writeProtectedPaths.map(canonical)
+        for grant in result {
+            if grant.access == .readOnly,
+               let writable = result.first(where: {
+                   $0.access == .readWrite && grant.pattern.overlaps($0.pattern, kind: .file, otherKind: $0.kind,
+                                                                    caseInsensitive: caseInsensitive)
+               }) {
+                // Compare the read-only pattern's matches, not all descendants of its directory
+                // matches: a read-only parent with an explicitly writable child remains valid.
+                throw CompileError.nestedReadOnlyInsideReadWrite(inner: grant.pattern.value, outer: writable.pattern.value)
+            }
+            for area in protected where grant.pattern.mayReachInside(area, kind: grant.kind, caseInsensitive: caseInsensitive) {
+                throw CompileError.overlapsProtectedPath(grant: grant.pattern.value, protected: area.value)
+            }
+            for area in writeProtected where grant.access == .readWrite && grant.pattern.mayReachInside(area, kind: grant.kind, caseInsensitive: caseInsensitive) {
+                throw CompileError.overlapsProtectedPath(grant: grant.pattern.value, protected: area.value)
+            }
+            guard !environment.allowsNestedReadOnly else { continue }
+            // A read-only pattern matching anything inside a writable directory only looks like a restriction.
+            // Matching the writable directory itself, or above it, is the read-only parent of a writable child.
+            if grant.access == .readOnly, let outer = files.first(where: {
+                $0.access == .readWrite && $0.kind == .directory
+                    && ($0.path.contains(grant.pattern.base, caseInsensitive: caseInsensitive)
+                        || grant.pattern.mayMatchBelow($0.path, caseInsensitive: caseInsensitive))
+            }) {
+                throw CompileError.nestedReadOnlyInsideReadWrite(inner: grant.pattern.value, outer: outer.path.value)
+            }
+            // Likewise a read-only plain grant that a writable pattern covers.
+            if grant.access == .readWrite, let inner = files.first(where: {
+                $0.access == .readOnly && grant.pattern.covers($0.path, kind: grant.kind, caseInsensitive: caseInsensitive)
+            }) {
+                throw CompileError.nestedReadOnlyInsideReadWrite(inner: inner.path.value, outer: grant.pattern.value)
+            }
+        }
+        return result
+    }
+
+    private func compileExec(_ grants: [ExecGrant], files: [CanonicalFileGrant], patterns: [CanonicalPatternGrant],
                              unrestrictedExec: Bool) throws -> [EffectiveExecGrant] {
         var merged: [String: (path: CanonicalPath, sha256: String?, unrestricted: Bool)] = [:]
         for grant in grants {
@@ -296,6 +398,10 @@ public struct PolicyCompiler: Sendable {
                 grant.kind == .directory
                     ? grant.path.contains(entry.path, caseInsensitive: caseInsensitive)
                     : grant.path.isSame(as: entry.path, caseInsensitive: caseInsensitive)
+            } || patterns.contains { grant in
+                grant.access == .readWrite && (grant.kind == .directory
+                    ? grant.pattern.mayCover(entry.path, caseInsensitive: caseInsensitive)
+                    : grant.pattern.matches(entry.path, caseInsensitive: caseInsensitive))
             }
             if mutable { throw CompileError.mutableExecutableWithoutHash(entry.path.value) }
         }

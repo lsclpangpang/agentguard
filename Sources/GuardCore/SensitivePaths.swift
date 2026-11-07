@@ -28,6 +28,15 @@ public struct SensitivePaths: Sendable {
         return isSensitive(path) || roots.contains { $0.starts(with: target) }
     }
 
+    /// True when a wildcard grant may cover any sensitive location.
+    public func overlapsSensitive(_ pattern: PathPattern, kind: PathKind, caseInsensitive: Bool) -> Bool {
+        roots.contains { root in
+            guard let area = try? CanonicalPath("/" + root.joined(separator: "/"), resolver: AliasResolver(aliases: [:])) else { return false }
+            // A file-kind grant above a sensitive root reaches nothing inside it.
+            return pattern.mayReachInside(area, kind: kind, caseInsensitive: caseInsensitive)
+        }
+    }
+
     private static func components(_ path: String) -> [String] {
         path.split(separator: "/").map(String.init)
     }

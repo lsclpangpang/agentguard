@@ -7,6 +7,8 @@ public protocol FileStore: Sendable {
     func list(_ directory: String) throws -> [String]
     /// Moves a file or directory; the destination's parent is created if needed.
     func move(_ source: String, to destination: String) throws
+    /// Deletes a file; nothing happens when it does not exist.
+    func remove(_ path: String) throws
 }
 
 public final class InMemoryFileStore: FileStore, @unchecked Sendable {
@@ -42,6 +44,11 @@ public final class InMemoryFileStore: FileStore, @unchecked Sendable {
             files[destination + path.dropFirst(source.count)] = data
         }
     }
+
+    public func remove(_ path: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        files.removeValue(forKey: path)
+    }
 }
 
 public struct LocalFileStore: FileStore {
@@ -66,6 +73,11 @@ public struct LocalFileStore: FileStore {
         let parent = URL(fileURLWithPath: destination).deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         try FileManager.default.moveItem(atPath: source, toPath: destination)
+    }
+
+    public func remove(_ path: String) throws {
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        try FileManager.default.removeItem(atPath: path)
     }
 }
 

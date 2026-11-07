@@ -158,7 +158,6 @@ struct FakeVerifier: AuthorizationVerifier {
         let s = service()
         try create(s, F.profile(revision: 1))
         _ = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.cliCaller, process: cliProcess)
-        #expect(s.handle(.reportVerification(instance: 1, passed: true), caller: F.appCaller, process: appProcess) == .ok)
         try create(s, F.profile(files: [F.ro("/Users/me/docs")], revision: 2))
         // The registering process is now part of the instance, so status comes from a fresh CLI invocation.
         let statusProcess = ProcessKey(pid: 30, version: 1)
@@ -186,7 +185,7 @@ struct FakeVerifier: AuthorizationVerifier {
         let requests: [HelperRequest] = [
             .status, .proposeChange(profile: F.profile(files: [F.rw("/Users/me/easyops")])),
             .approveChange(changeID: "c1", digest: "d", authorization: Data("ok".utf8)),
-            .registerInstance(profileID: "knodo", revision: 3), .reportVerification(instance: 2, passed: false),
+            .registerInstance(profileID: "knodo", revision: 3),
         ]
         for request in requests {
             #expect(try HelperWire.decodeRequest(HelperWire.encode(request)) == request)

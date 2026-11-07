@@ -10,13 +10,13 @@ import Testing
     }
 
     @Test func revisionStatesHaveDisplayText() {
-        #expect(RevisionState.applied(running: true).displayText == "已生效")
-        #expect(RevisionState.applied(running: false).displayText == "已停止")
-        #expect(RevisionState.oldInstancesAlive(residual: [ProcessKey(pid: 1, version: 1), ProcessKey(pid: 2, version: 1)], newInstanceRunning: true).displayText == "待生效：旧实例仍有 2 个进程")
-        #expect(RevisionState.unconfirmed(instances: [3]).displayText == "无法确认旧实例是否已退出")
-        #expect(RevisionState.awaitingVerification.displayText == "等待验收")
-        #expect(RevisionState.verificationFailed.displayText == "验收失败")
-        #expect(RevisionState.inconsistent.displayText == "运行修订与已保存修订不一致")
+        #expect(RevisionState.applied(running: true).displayText == "当前权限已生效")
+        #expect(RevisionState.applied(running: false).displayText == "未运行")
+        #expect(RevisionState.oldInstancesAlive(residual: [ProcessKey(pid: 1, version: 1), ProcessKey(pid: 2, version: 1)], newInstanceRunning: true).displayText == "运行中 · 权限待更新（旧副本还有 2 个进程）")
+        #expect(RevisionState.unconfirmed(instances: [3]).displayText == "暂时无法确认旧副本是否已退出")
+        #expect(RevisionState.awaitingVerification.displayText == "正在确认保护")
+        #expect(RevisionState.verificationFailed.displayText == "保护未通过确认")
+        #expect(RevisionState.inconsistent.displayText == "运行中的权限与保存的不一致")
     }
 
     @Test func homebrewPrefixDetection() {
@@ -32,8 +32,8 @@ import Testing
     }
 
     @Test func modeDisplayNames() {
-        #expect(Mode.enforce.displayName == "强制保护")
-        #expect(Mode.restrictedLearning.displayName == "受限学习")
+        #expect(Mode.enforce.displayName == "保护中")
+        #expect(Mode.restrictedLearning.displayName == "保护中 · 记录更多活动")
         #expect(Mode.unprotectedObserve.displayName == "无保护观察")
     }
 
@@ -49,7 +49,7 @@ import Testing
         #expect(CompileError.nestedReadOnlyInsideReadWrite(inner: "/a", outer: "/").message
                 == "/a 是只读，但外层的 / 是读写，两条规则互相矛盾。要收回写权限，请先将外层目录改为只读或移除它的读写授权")
         #expect(CompileError.mutableExecutableWithoutHash("/opt/bin").message
-                == "/opt/bin 落在可写目录里，必须限定哈希才能执行")
+                == "/opt/bin 落在受管程序可写的目录里，程序可以替换它，所以不能直接放行执行。请改为放行不可写位置的程序")
     }
 
     @Test func everyCompileErrorHasAMessage() {
@@ -65,5 +65,47 @@ import Testing
             #expect(!error.message.isEmpty)
             #expect(!error.message.contains("Optional("))
         }
+    }
+}
+
+@Suite struct ProgramStatusSummaryTests {
+    func status(_ state: RevisionState, unmanaged: [Int32] = [], untracked: [Int] = []) -> ProfileStatusReport {
+        ProfileStatusReport(profileID: "knodo", savedRevision: 2, mode: .enforce, revisionState: state, runningInstances: [1], pendingCount: 0,
+                            unmanagedProcesses: unmanaged, untrackedInstances: untracked)
+    }
+
+    @Test func savedButNotAppliedSaysRestartAndApply() {
+        let s = ProgramStatusSummary.evaluate(status(.oldInstancesAlive(residual: [ProcessKey(pid: 1, version: 1)], newInstanceRunning: false)),
+                                              freshness: .current, programName: "Knodo", hasLaunch: true)
+        #expect(s.headline == "运行中 · 权限待更新")
+        #expect(s.impact.contains("重启 Knodo 后生效"))
+        #expect(s.next == .restartAndApply)
+    }
+
+    @Test func unprotectedObservationIsNeverGreen() {
+        var report = status(.applied(running: true))
+        report.mode = .unprotectedObserve
+        let s = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
+        #expect(s.level == .problem && s.headline == "运行中 · 没有保护")
+        var stopped = status(.applied(running: false))
+        stopped.mode = .unprotectedObserve
+        stopped.runningInstances = []
+        #expect(ProgramStatusSummary.evaluate(stopped, freshness: .current, programName: "Knodo", hasLaunch: true).level == .problem)
+    }
+
+    @Test func staleIsNeverGreen() {
+        let s = ProgramStatusSummary.evaluate(status(.applied(running: true)), freshness: .stale(confirmedAt: nil), programName: "Knodo", hasLaunch: true)
+        #expect(s.headline == "状态待确认" && s.level == .attention)
+    }
+
+    @Test func untrackedCopiesAreNotClaimedProtected() {
+        let s = ProgramStatusSummary.evaluate(status(.applied(running: true), untracked: [1]), freshness: .current, programName: "Knodo", hasLaunch: true)
+        #expect(s.level == .attention && s.next == .restart)
+    }
+
+    @Test func unmanagedCopiesAreAProblem() {
+        let s = ProgramStatusSummary.evaluate(status(.applied(running: true), unmanaged: [9]), freshness: .current, programName: "Knodo", hasLaunch: true)
+        #expect(s.level == .problem && s.next == .stopUnmanaged)
+        #expect(s.headline == "运行中 · 当前权限已生效")
     }
 }

@@ -42,6 +42,20 @@ enum CollectorInstaller {
         }
     }
 
+    /// Unloads and removes the collector daemon and its binary; returns what could not be removed.
+    static func uninstall() -> [String] {
+        var problems: [String] = []
+        if Launchctl.run(["print", "system/" + AgentGuardConfig.collectorLabel]) == 0,
+           Launchctl.run(["bootout", "system/" + AgentGuardConfig.collectorLabel]) != 0 {
+            problems.append("采集器后台任务未能停止")
+        }
+        for path in [AgentGuardConfig.collectorPlistPath, AgentGuardConfig.collectorPath, AgentGuardConfig.collectorFileEventsFlagPath]
+        where FileManager.default.fileExists(atPath: path) {
+            do { try FileManager.default.removeItem(atPath: path) } catch { problems.append("未能删除 \(path)") }
+        }
+        return problems
+    }
+
     private static func install(_ contents: Data) throws {
         let directory = AgentGuardConfig.privilegedHelperToolsDirectory
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)

@@ -29,12 +29,16 @@ public enum FileGrantMerger {
     /// Combines duplicate grants and removes descendants covered by an equal-or-wider directory
     /// grant. The first spelling of a path is retained so adding `/tmp` does not unexpectedly make
     /// the UI display its `/private/tmp` alias; comparisons still use the canonical path.
+    /// Wildcard grants are kept as written (exact duplicates aside): whether one covers another is
+    /// not decided here, and the compiler still checks them.
     public static func normalize(_ grants: [FileGrant], resolver: any PathResolver,
                                  caseInsensitive: Bool) throws -> [FileGrant] {
         var entries: [Entry] = []
         entries.reserveCapacity(grants.count)
+        var seenPatterns: Set<FileGrant> = []
+        let patterns = grants.filter { $0.pattern && seenPatterns.insert($0).inserted }
 
-        for grant in grants {
+        for grant in grants where !grant.pattern {
             let path = try CanonicalPath(grant.path, resolver: resolver)
             if let index = entries.firstIndex(where: {
                 $0.path.isSame(as: path, caseInsensitive: caseInsensitive) && $0.grant.expiresAt == grant.expiresAt
@@ -71,7 +75,7 @@ public enum FileGrantMerger {
             entries.remove(at: removedIndex)
         }
 
-        return entries.map(\.grant)
+        return entries.map(\.grant) + patterns
     }
 
     private static func mergedSamePath(_ first: FileGrant, _ second: FileGrant) -> FileGrant {

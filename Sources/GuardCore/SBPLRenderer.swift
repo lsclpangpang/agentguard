@@ -18,6 +18,11 @@ public struct SBPLRenderer: Sendable {
             lines.append("(deny default)")
             lines += environment.baseRules
             lines += fileRules(policy.files)
+            lines += policy.patterns.map { grant in
+                let operations = grant.access == .readWrite ? "file-read* file-write*" : "file-read*"
+                // `#"` starts an SBPL regex literal; patterns never contain `"`.
+                return "(allow \(operations) (regex #\"\(grant.regex)\"))"
+            }
             if policy.unrestrictedExec { lines.append("(allow process-exec)") }
             lines += policy.exec.map { "(allow process-exec (literal \(quote($0.path))))" }
             lines += networkRules(policy.network)
