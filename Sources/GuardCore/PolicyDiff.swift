@@ -156,7 +156,7 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .extraRuleRemoved(rule): return "rule-|\(rule)"
         case let .launchChanged(to):
             guard let to else { return "launch|-" }
-            return "launch|\(to.executable)|\(to.arguments.joined(separator: "\u{1f}"))|\(to.workingDirectory ?? "-")|\(to.originalLabel ?? "-")|\(to.restartOnCleanExit)|\(to.runAtLogin)|\(to.originalPath ?? "-")"
+            return "launch|\(to.executable)|\(to.arguments.joined(separator: "\u{1f}"))|\(to.workingDirectory ?? "-")|\(to.originalLabel ?? "-")|\(to.restartOnCleanExit)|\(to.runAtLogin)|\(to.originalPath ?? "-")|\(to.scriptPath ?? "-")"
         case let .programAdded(path): return "program+|\(path)"
         case let .programRemoved(path): return "program-|\(path)"
         }

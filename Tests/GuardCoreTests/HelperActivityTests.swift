@@ -135,24 +135,24 @@ import Testing
         let root = ProcessKey(pid: 100, version: 7)
         tracker.register(instance: 1, profileID: "knodo", revision: 1, root: root, restored: true)
         let processes = [
-            RunningProcess(key: ProcessKey(pid: 101, version: 0), executablePath: "/bin/sh", parentPID: 100),
-            RunningProcess(key: ProcessKey(pid: 102, version: 0), executablePath: "/bin/cat", parentPID: 101),
+            RunningProcess(key: ProcessKey(pid: 101, version: 0), executablePath: "/bin/sh", parentPID: 100, startTime: 1010),
+            RunningProcess(key: ProcessKey(pid: 102, version: 0), executablePath: "/bin/cat", parentPID: 101, startTime: 1020),
             RunningProcess(key: ProcessKey(pid: 200, version: 0), executablePath: "/bin/zsh", parentPID: 1),
         ]
-        let adopted = tracker.adoptDescendants(of: processes, birth: { UInt64($0) * 10 })
+        let adopted = tracker.adoptDescendants(of: processes, knownBirths: [root: 1000], birth: { UInt64($0) * 10 })
         #expect(Set(adopted.keys.map(\.pid)) == [101, 102])
         #expect(tracker.owner(ofPID: 102) == 1)
         #expect(tracker.owner(ofPID: 200) == nil)
         #expect(tracker.snapshot(of: 1)?.trackingIncomplete == true)
         // A second scan adds nothing new.
-        #expect(tracker.adoptDescendants(of: processes, birth: { UInt64($0) * 10 }).isEmpty)
+        #expect(tracker.adoptDescendants(of: processes, knownBirths: adopted.merging([root: 1000]) { a, _ in a }, birth: { UInt64($0) * 10 }).isEmpty)
     }
 
     @Test func observedInstancesAreNotAdoptedInto() {
         var tracker = InstanceTracker()
         tracker.register(instance: 1, profileID: "knodo", revision: 1, root: ProcessKey(pid: 100, version: 1))
         let child = RunningProcess(key: ProcessKey(pid: 101, version: 0), executablePath: "/bin/sh", parentPID: 100)
-        #expect(tracker.adoptDescendants(of: [child], birth: { _ in 1 }).isEmpty)
+        #expect(tracker.adoptDescendants(of: [child], knownBirths: [:], birth: { _ in 1 }).isEmpty)
         #expect(tracker.snapshot(of: 1)?.trackingIncomplete == false)
         tracker.handle(.gap)
         #expect(tracker.snapshot(of: 1)?.trackingIncomplete == true)

@@ -139,7 +139,7 @@ struct NewProgramWizard: View {
             }
             if let plan {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("将运行：\(plan.command)").font(.callout).textSelection(.enabled)
+                    Text("将运行：\(LaunchArguments.format([plan.launchExecutable] + plan.launchArguments))").font(.callout).textSelection(.enabled)
                     if plan.program == nil {
                         Text("这是一个脚本，由解释器运行。直接在 AgentGuard 之外运行它的副本无法被检测。").font(.caption).foregroundStyle(.secondary)
                     }
@@ -253,8 +253,7 @@ struct NewProgramWizard: View {
         }
         let refs = model.templates.filter { templateIDs.contains($0.id) }.map { TemplateRef(id: $0.id, version: $0.version) }
         let launch = runsInBackground
-            ? LaunchSettings(executable: plan.command, arguments: (try? LaunchArguments.parse(arguments)) ?? [], workingDirectory: folder,
-                             originalLabel: nil, restartOnCleanExit: false, runAtLogin: runAtLogin)
+            ? plan.launch(arguments: (try? LaunchArguments.parse(arguments)) ?? [], workingDirectory: folder, runAtLogin: runAtLogin)
             : nil
         return Profile(id: name, revision: 1, mode: recordMore ? .restrictedLearning : .enforce, templates: refs, files: files,
                        exec: plan.exec.filter { $0 != plan.program }.map { ExecGrant(path: $0) },

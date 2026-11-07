@@ -2,11 +2,14 @@ public struct RunningProcess: Hashable, Sendable {
     public var key: ProcessKey
     public var executablePath: String
     public var parentPID: Int32?
+    /// Collected together with parentPID, so adoption cannot combine two different PID lifetimes.
+    public var startTime: UInt64?
 
-    public init(key: ProcessKey, executablePath: String, parentPID: Int32? = nil) {
+    public init(key: ProcessKey, executablePath: String, parentPID: Int32? = nil, startTime: UInt64? = nil) {
         self.key = key
         self.executablePath = executablePath
         self.parentPID = parentPID
+        self.startTime = startTime
     }
 }
 

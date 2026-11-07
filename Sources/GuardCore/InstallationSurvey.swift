@@ -61,7 +61,7 @@ public enum InstallationSurvey {
     public static func survey(profiles: [Profile], entries: [LaunchEntry], disabled: [DisabledLaunchEntry], status: [ProfileStatusReport],
                               resolver: any PathResolver, caseInsensitive: Bool) -> [ProgramSurvey] {
         profiles.sorted { $0.id < $1.id }.map { profile in
-            let targets = Array(Set(profile.programs + (profile.launch.map { [$0.executable] } ?? []))).sorted()
+            let targets = Array(Set(profile.programs + (profile.launch.map { [$0.detectionTarget] } ?? []))).sorted()
             let canonicalTargets = targets.compactMap { try? CanonicalPath($0, resolver: resolver) }
             func startsTarget(_ entry: LaunchEntry) -> Bool {
                 ([entry.executable] + entry.arguments).contains { word in

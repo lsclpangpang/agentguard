@@ -123,10 +123,10 @@ extension AppModel {
     func command(for profile: Profile) -> String? {
         guard let target = profile.launch?.executable ?? profile.programs.first ?? profile.exec.first?.path else { return nil }
         let guardPath = config.appBundle + "/Contents/MacOS/guard"
-        var command = LaunchArguments.format([guardPath, "run", profile.id, "--", target] + (profile.launch?.arguments ?? []))
+        var command = ShellCommand.format([guardPath, "run", profile.id, "--", target] + (profile.launch?.arguments ?? []))
         let directory = profile.launch?.workingDirectory
             ?? profile.files.first { $0.access == .readWrite && $0.kind == .directory && !$0.pattern }?.path
-        if let directory { command = "cd " + LaunchArguments.format([directory]) + " && " + command }
+        if let directory { command = "cd " + ShellCommand.format([directory]) + " && " + command }
         return command
     }
 
@@ -196,6 +196,7 @@ extension AppModel {
     /// Stops every managed program, removes AgentGuard's launch items, the collector and the Helper.
     /// Profiles, backups and the programs' working data stay on disk.
     func uninstall(restoreOriginals: Bool) {
+        guard !uninstalling else { return }
         let profiles = report?.profiles ?? []
         var lines = ["停止全部受管程序：" + (profiles.isEmpty ? "无" : profiles.map(\.profileID).joined(separator: "、")),
                      "移除 AgentGuard 安装的启动项、活动记录采集器和后台服务"]
@@ -208,27 +209,51 @@ extension AppModel {
         lines.append("完成后把 AgentGuard 从“应用程序”文件夹移到废纸篓")
         Task {
             guard await askConfirmation(restoreOriginals ? "卸载 AgentGuard 并恢复原启动方式" : "卸载 AgentGuard", lines) else { return }
-            let ok = await Task.detached { () -> Bool in
-                do {
-                    let token = try UserAuthorization.obtain(scope: HelperService.authorizationScope(forUninstall: restoreOriginals),
-                                                             prompt: "AgentGuard 将停止受管程序并移除自身的后台组件")
-                    return await self.sendAsync(.uninstall(restoreOriginals: restoreOriginals, authorization: token), refreshAfter: false)
-                } catch {
-                    await MainActor.run { self.lastError = "\(error)" }
-                    return false
-                }
+            guard !uninstalling else { return }
+            uninstalling = true
+            defer { uninstalling = false }
+            let authorization = await Task.detached { () -> Result<Data, Error> in
+                Result { try UserAuthorization.obtain(scope: HelperService.authorizationScope(forUninstall: restoreOriginals),
+                                                       prompt: "AgentGuard 将停止受管程序并移除自身的后台组件") }
             }.value
-            guard ok else { return }
+            guard case let .success(token) = authorization else {
+                if case let .failure(error) = authorization { lastError = "\(error)" }
+                return
+            }
+            suspendHelperMaintenance()
+            let ok = await sendAsync(.uninstall(restoreOriginals: restoreOriginals, authorization: token), refreshAfter: false)
+            guard ok else {
+                lastWarning = "卸载未完成，自动安装和状态轮询已暂停。可以重试卸载；如需恢复使用，请点“检查并修复”。"
+                return
+            }
+            var helperRemoved = false
             do {
                 try await SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName).unregister()
+                helperRemoved = true
             } catch {
                 lastWarning = [lastWarning, "后台服务没有完全移除：\(error.localizedDescription)。请在“系统设置 > 通用 > 登录项”中关闭 AgentGuard。"]
                     .compactMap { $0 }.joined(separator: "\n")
             }
-            try? await SMAppService.mainApp.unregister()
-            lastNotice = [lastNotice, "AgentGuard 的后台组件已移除。现在可以退出 AgentGuard，并把它从“应用程序”文件夹移到废纸篓。"]
+            if SMAppService.mainApp.status != .notRegistered {
+                do { try await SMAppService.mainApp.unregister() }
+                catch {
+                    lastWarning = [lastWarning, "未能取消 AgentGuard 登录时启动：\(error.localizedDescription)"]
+                        .compactMap { $0 }.joined(separator: "\n")
+                }
+            }
+            helperReachable = false
+            statusConfirmedAt = nil
+            report = nil
+            let conclusion: String
+            if !helperRemoved {
+                conclusion = "卸载尚未完成。自动安装已暂停，请按上方提示移除后台服务。"
+            } else if !(lastWarning?.isEmpty ?? true) {
+                conclusion = "后台服务已移除，但部分停止或清理结果尚未确认，请查看上方提示。自动安装已暂停。"
+            } else {
+                conclusion = "AgentGuard 的后台组件已移除。现在可以退出 AgentGuard，并把它从“应用程序”文件夹移到废纸篓。"
+            }
+            lastNotice = [lastNotice, conclusion]
                 .compactMap { $0 }.joined(separator: "\n")
-            refresh()
         }
     }
 }

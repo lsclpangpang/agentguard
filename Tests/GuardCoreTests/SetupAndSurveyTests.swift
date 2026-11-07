@@ -27,6 +27,8 @@ import Testing
         let plan = try ProgramSetup.analyze("/opt/homebrew/bin/claude", home: "/Users/me", homebrewPrefix: "/opt/homebrew", probe: probe).get()
         #expect(plan.command == "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js")
         #expect(plan.program == nil)
+        #expect(plan.launchExecutable == "/opt/homebrew/Cellar/node/22.1.0/bin/node")
+        #expect(plan.launchArguments == [plan.command])
         #expect(plan.exec == [plan.command, "/opt/homebrew/Cellar/node/22.1.0/bin/node", "/usr/bin/env"])
         #expect(plan.files.map(\.path) == ["/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code", "/opt/homebrew/Cellar/node/22.1.0"])
         #expect(plan.files.allSatisfy { $0.access == .readOnly })
@@ -44,7 +46,8 @@ import Testing
     @Test func shellScriptOutsidePackageGetsItsOwnFile() throws {
         let plan = try ProgramSetup.analyze("/Users/me/bin/run.sh", home: "/Users/me", homebrewPrefix: "/opt/homebrew", probe: probe).get()
         #expect(plan.exec == ["/Users/me/bin/run.sh", "/bin/zsh"])
-        #expect(plan.files == [FileGrant(path: "/Users/me/bin/run.sh", kind: .file, access: .readOnly)])
+        #expect(plan.files == [FileGrant(path: "/Users/me/bin/run.sh", kind: .file, access: .readOnly),
+                               FileGrant(path: "/bin/zsh", kind: .file, access: .readOnly)])
     }
 
     @Test func missingInterpreterIsReported() {

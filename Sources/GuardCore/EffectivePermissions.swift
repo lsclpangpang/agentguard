@@ -41,11 +41,13 @@ public struct PermissionEntry: Hashable, Sendable {
     public var sources: [SourcedFileGrant]
     /// Broader directory grants whose reach includes this location.
     public var inherited: [SourcedFileGrant]
+    /// Grants reaching some matching locations; these do not prove the whole entry redundant.
+    public var overlapping: [SourcedFileGrant] = []
 
-    /// What the sandbox allows here: the widest of the entry's own and inherited grants.
-    public var access: Access { (sources + inherited).map(\.access).max() ?? .readOnly }
+    /// Widest known access anywhere in this entry, including partial overlaps.
+    public var access: Access { (sources + inherited + overlapping).map(\.access).max() ?? .readOnly }
     public var ownAccess: Access { sources.map(\.access).max() ?? .readOnly }
-    public var readsSecrets: Bool { (sources + inherited).contains(where: \.readsSecrets) }
+    public var readsSecrets: Bool { (sources + inherited + overlapping).contains(where: \.readsSecrets) }
     /// A broader grant already allows at least as much, so removing this entry alone changes nothing.
     public var redundant: Bool { inherited.contains { $0.access >= ownAccess } }
 }
@@ -66,13 +68,18 @@ public struct PermissionOverview: Hashable, Sendable {
     public var files: [PermissionEntry]
     public var exec: [ExecPermission]
     public var ports: [PortPermission]
+    /// Structured settings; `unverifiedNetwork` / `unverifiedExec` prevent interpreting these as
+    /// exhaustive when raw rules or system imports may grant additional rights.
     public var network: NetworkPolicy
     public var unrestrictedExec: Bool
-    /// Migrated file rules whose reach nobody can determine; while any exist the list is incomplete.
+    /// Migrated rules whose complete effects are not represented by this overview.
     public var unverifiedLegacy: [String]
+    public var unverifiedBaseRules: [String] = []
+    public var unverifiedNetwork: [String] = []
+    public var unverifiedExec: [String] = []
 
     /// Only a complete overview may be presented as "this is everything the program can access".
-    public var complete: Bool { unverifiedLegacy.isEmpty }
+    public var complete: Bool { unverifiedLegacy.isEmpty && unverifiedBaseRules.isEmpty }
 }
 
 /// What revoking access at one location leaves in place.
@@ -84,9 +91,10 @@ public struct RevocationCheck: Equatable, Sendable {
     public var outerUserGrants: [FileGrant]
     /// Grants the user cannot change from the file list: templates, automatic grants.
     public var fixed: [SourcedFileGrant]
+    public var unverifiedRules: [String] = []
 
     /// True when nothing but the inner grants (handled with the change) keeps the access.
-    public var isComplete: Bool { fixed.isEmpty && outerUserGrants.isEmpty }
+    public var isComplete: Bool { fixed.isEmpty && outerUserGrants.isEmpty && unverifiedRules.isEmpty }
 }
 
 public enum EffectivePermissions {
@@ -123,7 +131,19 @@ public enum EffectivePermissions {
                     return ci ? here.value.lowercased().hasPrefix(prefix.lowercased()) : here.value.hasPrefix(prefix)
                 }
             }
-            return PermissionEntry(path: first.path, kind: kind, pattern: first.pattern, sources: sources, inherited: inherited)
+            var overlapping: [SourcedFileGrant] = []
+            if first.pattern, let target = try? PathPattern(first.path, resolver: identity) {
+                for grant in grants where !sources.contains(grant) {
+                    if !grant.pattern, grant.kind == .directory, let path = try? CanonicalPath(grant.path, resolver: identity),
+                       path.contains(target.base, caseInsensitive: ci) {
+                        inherited.append(grant)
+                    } else if overlaps(grant, target: target, kind: kind, environment: environment) {
+                        overlapping.append(grant)
+                    }
+                }
+            }
+            return PermissionEntry(path: first.path, kind: kind, pattern: first.pattern, sources: sources,
+                                   inherited: inherited, overlapping: overlapping)
         }
         files.sort { ($0.path, $0.pattern ? 1 : 0) < ($1.path, $1.pattern ? 1 : 0) }
 
@@ -150,15 +170,38 @@ public enum EffectivePermissions {
             ports: ports.map { PortPermission(port: $0.key, sources: $0.value) }.sorted { $0.port < $1.port },
             network: profile.network,
             unrestrictedExec: profile.unrestrictedExec,
-            unverifiedLegacy: legacy.unverified
+            unverifiedLegacy: legacy.unverifiedPermissions,
+            unverifiedBaseRules: environment.baseRules,
+            unverifiedNetwork: legacy.networkRules + environment.baseRules,
+            unverifiedExec: legacy.execRules + environment.baseRules
         )
     }
 
-    /// Grants other than `excluded` (and other than legacy rules, which `LegacyRevocation` handles)
+    /// Grants other than `excluded` (legacy rules for literal paths use `LegacyRevocation`)
     /// that keep access at `path` or inside it after the change. Revoking write (`keeping: .readOnly`)
     /// only counts writable grants; revoking all access (`keeping: nil`) counts every grant.
     public static func remaining(at path: String, kind: PathKind, keeping access: Access?, excluding excluded: FileGrant,
                                  in profile: Profile, templates: [Template], environment: CompileEnvironment) throws -> RevocationCheck {
+        if excluded.pattern {
+            let target = try PathPattern(path, resolver: environment.resolver)
+            let revoked: Access = access == .readOnly ? .readWrite : .readOnly
+            let grants = sourcedGrants(of: profile, templates: templates, environment: environment)
+            let outer = profile.files.filter { grant in
+                guard grant != excluded, grant.access >= revoked else { return false }
+                let canonical = grant.pattern
+                    ? (try? PathPattern(grant.path, resolver: environment.resolver))?.value
+                    : (try? CanonicalPath(grant.path, resolver: environment.resolver))?.value
+                guard let canonical else { return true }
+                return overlaps(SourcedFileGrant(source: .user, path: canonical, kind: grant.kind, access: grant.access,
+                                                 pattern: grant.pattern), target: target, kind: kind, environment: environment)
+            }
+            let fixed = grants.filter {
+                $0.source != .user && $0.access >= revoked && overlaps($0, target: target, kind: kind, environment: environment)
+            }
+            let legacy = LegacyRuleAnalysis(rules: profile.extraRules, resolver: environment.resolver, caseInsensitive: environment.caseInsensitive)
+            return RevocationCheck(innerUserGrants: [], outerUserGrants: outer, fixed: fixed,
+                                   unverifiedRules: legacy.unverified)
+        }
         let area = try CanonicalPath(path, resolver: environment.resolver)
         let revoked: Access = access == .readOnly ? .readWrite : .readOnly
         var inner: [FileGrant] = [], outer: [FileGrant] = []
@@ -181,6 +224,21 @@ public enum EffectivePermissions {
 
     /// Paths here are already canonical; re-resolving them must not change them.
     private static let identity = AliasResolver(aliases: [:])
+
+    private static func overlaps(_ grant: SourcedFileGrant, target: PathPattern, kind: PathKind,
+                                 environment: CompileEnvironment) -> Bool {
+        // Legacy string prefixes are not glob components; retain uncertainty rather than
+        // accidentally excluding their cross-directory reach.
+        if isLegacyPrefix(grant) { return true }
+        if grant.pattern {
+            guard let pattern = try? PathPattern(grant.path, resolver: identity) else { return true }
+            return target.overlaps(pattern, kind: kind, otherKind: grant.kind, caseInsensitive: environment.caseInsensitive)
+        }
+        guard let path = try? CanonicalPath(grant.path, resolver: identity) else { return true }
+        return grant.kind == .directory
+            ? target.mayReachInside(path, kind: kind, caseInsensitive: environment.caseInsensitive)
+            : target.covers(path, kind: kind, caseInsensitive: environment.caseInsensitive)
+    }
 
     static func enabled(_ templates: [Template], in profile: Profile) -> [Template] {
         let byID = Dictionary(templates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })

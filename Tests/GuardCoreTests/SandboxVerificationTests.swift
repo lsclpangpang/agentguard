@@ -155,7 +155,8 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
         probe.writable = ["/Users/me/work"]
         let s = try service(probe: probe)
         s.restoreInstance(id: 4, profileID: "knodo", revision: 1, root: ProcessKey(pid: 30, version: 9), supervisedByLaunchd: true)
-        #expect(status(s)?.revisionState == .applied(running: true))
+        #expect(status(s)?.revisionState == .unconfirmed(instances: [4]))
+        #expect(status(s)?.verificationIssues.isEmpty == true)
         guard case let .registered(instance, _) = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.cliCaller,
                                                            process: ProcessKey(pid: 40, version: 1)) else {
             Issue.record("expected registration"); return

@@ -49,7 +49,7 @@ public struct InstanceSnapshot: Equatable, Sendable {
 
     /// Some of the instance's processes may have started outside our view: it was restored without
     /// its history, or the collector lost events while it ran.
-    public var trackingIncomplete: Bool { isRunning && (restored || !lifecycleConfirmed) }
+    public var trackingIncomplete: Bool { restored || !lifecycleConfirmed }
 
     /// The entry exited but processes it started are still running, so launchd will not restart them
     /// if they crash. Typically an entry script that backgrounds the daemon instead of `exec`-ing it.
@@ -115,23 +115,37 @@ public struct InstanceTracker: Sendable {
     /// Attaches the descendants of restored instances found in a process listing, by parent PID.
     /// Only restored instances need this: the collector reports every fork of the others. Returns
     /// the keys added, each built like a restored root's from the process birth time.
-    public mutating func adoptDescendants(of processes: [RunningProcess], birth: (Int32) -> UInt64?) -> [ProcessKey: UInt64] {
+    public mutating func adoptDescendants(of processes: [RunningProcess], knownBirths: [ProcessKey: UInt64],
+                                         birth: (Int32) -> UInt64?) -> [ProcessKey: UInt64] {
         var ownerByPID: [Int32: Int] = [:]
-        for (key, id) in owners where instances[id]?.restored == true { ownerByPID[key.pid] = id }
+        var validatedBirths: [Int32: UInt64] = [:]
+        for (key, id) in owners where instances[id]?.restored == true {
+            guard let expected = knownBirths[key], birth(key.pid) == expected else {
+                handle(.exit(key))
+                continue
+            }
+            ownerByPID[key.pid] = id
+            validatedBirths[key.pid] = expected
+        }
         guard !ownerByPID.isEmpty else { return [:] }
         var children: [Int32: [RunningProcess]] = [:]
         for process in processes { if let parent = process.parentPID { children[parent, default: []].append(process) } }
         var adopted: [ProcessKey: UInt64] = [:]
         var queue = Array(ownerByPID.keys)
         while let parent = queue.popLast() {
-            guard let id = ownerByPID[parent] else { continue }
+            guard let id = ownerByPID[parent], let parentBirth = validatedBirths[parent],
+                  birth(parent) == parentBirth else { continue }
             for child in children[parent] ?? [] where ownerByPID[child.key.pid] == nil && owners.keys.allSatisfy({ $0.pid != child.key.pid }) {
-                guard let born = birth(child.key.pid) else { continue }
+                // A stale process listing must not attach a process born before its claimed parent,
+                // nor a child whose parent was reused while the scan was in progress.
+                guard let born = child.startTime, birth(child.key.pid) == born,
+                      born >= parentBirth, birth(parent) == parentBirth else { continue }
                 let key = ProcessKey(pid: child.key.pid, version: UInt32(truncatingIfNeeded: born))
                 owners[key] = id
                 instances[id]?.liveProcesses.insert(key)
                 ownerByPID[child.key.pid] = id
                 adopted[key] = born
+                validatedBirths[key.pid] = born
                 queue.append(child.key.pid)
             }
         }

@@ -22,11 +22,17 @@ public struct LegacyRuleAnalysis: Equatable, Sendable {
     /// File rules whose reach cannot be determined; their effect on any path is unknown.
     public private(set) var unverified: [String] = []
     public private(set) var other: [String] = []
+    /// Non-file effects are not interpreted as structured settings. Keep their uncertainty visible,
+    /// including rules combining file and non-file operations.
+    public private(set) var networkRules: [String] = []
+    public private(set) var execRules: [String] = []
     private let caseInsensitive: Bool
 
     public init(rules: [String], resolver: any PathResolver, caseInsensitive: Bool) {
         self.caseInsensitive = caseInsensitive
         for rule in rules {
+            if Self.mayGrant(rule, operation: "network") { networkRules.append(rule) }
+            if Self.mayGrant(rule, operation: "process-exec") { execRules.append(rule) }
             switch Self.classify(rule, resolver: resolver) {
             case let .file(access, matches): fileRules.append(LegacyFileRule(rule: rule, access: access, matches: matches))
             case .other: other.append(rule)
@@ -36,6 +42,41 @@ public struct LegacyRuleAnalysis: Equatable, Sendable {
     }
 
     public var hasUnverifiedFileRules: Bool { !unverified.isEmpty }
+    public var unverifiedPermissions: [String] { Array(Set(unverified + other + networkRules + execRules)).sorted() }
+
+    private static func mayGrant(_ rule: String, operation: String) -> Bool {
+        guard case let .list(items)? = SExpression.parse(rule), items.first == .atom("allow") else { return true }
+        return items.dropFirst().contains {
+            guard case let .atom(name) = $0 else { return false }
+            return name == "default" || name == "*" || name.hasPrefix(operation)
+                || (operation == "process-exec" && name == "process*")
+        }
+    }
+
+    /// Narrowing a structured switch cannot revoke a verbatim rule. Name retained rules in the
+    /// change confirmation; removing them explicitly remains a separately reviewable change.
+    public static func revocationWarnings(from before: Profile, to after: Profile, environment: CompileEnvironment) -> [String] {
+        let remaining = LegacyRuleAnalysis(rules: after.extraRules, resolver: environment.resolver,
+                                           caseInsensitive: environment.caseInsensitive)
+        let a = before.network, b = after.network
+        let narrowsNetwork = (a.outboundTCP == .allowed && b.outboundTCP == .denied)
+            || (a.listen == .allowed && b.listen == .denied) || (a.udp == .allowed && b.udp == .denied)
+            || !Set(a.loopbackTCPConnect).isSubset(of: Set(b.loopbackTCPConnect))
+        let narrowsExec = (before.unrestrictedExec && !after.unrestrictedExec)
+            || !Set(before.exec).isSubset(of: Set(after.exec))
+            || !Set(before.programs).isSubset(of: Set(after.programs))
+        var warnings: [String] = []
+        if narrowsNetwork && !remaining.networkRules.isEmpty {
+            warnings += ["注意：以下旧规则仍可能允许网络访问，关闭开关不能保证收回："] + remaining.networkRules
+        }
+        if narrowsExec && !remaining.execRules.isEmpty {
+            warnings += ["注意：以下旧规则仍可能允许运行程序，删除列表项不能保证收回："] + remaining.execRules
+        }
+        if (narrowsNetwork || narrowsExec) && !environment.baseRules.isEmpty {
+            warnings.append("系统基础规则的访问范围尚未逐项核对；这次修改只收回所列显式授权。")
+        }
+        return warnings
+    }
 
     /// Rules granting at least `access` only at `path` itself or below it: every filter is within.
     /// Removing them is part of revoking `path`; they reach nothing the user did not ask to revoke.

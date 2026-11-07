@@ -147,9 +147,13 @@ public struct LaunchSettings: Codable, Hashable, Sendable {
     public var runAtLogin: Bool
     /// The selected item's actual filename need not match its Label.
     public var originalPath: String?
+    /// For a pinned interpreter launch, the script identifies the program. Watching the shared
+    /// interpreter would misclassify every other Node/Python process and startup item as this one.
+    public var scriptPath: String?
+    public var detectionTarget: String { scriptPath ?? executable }
 
     public init(executable: String, arguments: [String], workingDirectory: String?, originalLabel: String?, restartOnCleanExit: Bool,
-                runAtLogin: Bool = true, originalPath: String? = nil) {
+                runAtLogin: Bool = true, originalPath: String? = nil, scriptPath: String? = nil) {
         self.executable = executable
         self.arguments = arguments
         self.workingDirectory = workingDirectory
@@ -157,6 +161,7 @@ public struct LaunchSettings: Codable, Hashable, Sendable {
         self.restartOnCleanExit = restartOnCleanExit
         self.runAtLogin = runAtLogin
         self.originalPath = originalPath
+        self.scriptPath = scriptPath
     }
 
     enum CodingKeys: String, CodingKey {
@@ -166,6 +171,7 @@ public struct LaunchSettings: Codable, Hashable, Sendable {
         case restartOnCleanExit = "restart_on_clean_exit"
         case runAtLogin = "run_at_login"
         case originalPath = "original_path"
+        case scriptPath = "script_path"
     }
 
     public init(from decoder: Decoder) throws {
@@ -177,6 +183,7 @@ public struct LaunchSettings: Codable, Hashable, Sendable {
         restartOnCleanExit = try c.decode(Bool.self, forKey: .restartOnCleanExit)
         runAtLogin = try c.decodeIfPresent(Bool.self, forKey: .runAtLogin) ?? true
         originalPath = try c.decodeIfPresent(String.self, forKey: .originalPath)
+        scriptPath = try c.decodeIfPresent(String.self, forKey: .scriptPath)
     }
 }
 

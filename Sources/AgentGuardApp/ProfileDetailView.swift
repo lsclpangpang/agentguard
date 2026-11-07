@@ -194,13 +194,16 @@ private struct EffectivePermissionsCard: View {
     var body: some View {
         let overview = model.overview(profile)
         Card(title: "实际权限", systemImage: "checklist",
-             subtitle: overview.complete ? "下面合并了你添加的授权、推荐权限组、程序启动所需和迁移来的旧规则，是这个程序实际可以访问的全部位置。"
-                                         : "存在无法核对的旧规则，下面的列表可能不完整。") {
+             subtitle: overview.complete ? "下面合并了你添加的授权、推荐权限组、程序启动所需和已核对的迁移规则。"
+                                         : "部分旧规则或系统基础规则尚未逐项核对，下面列出已知授权。") {
             Button(expanded ? "收起" : "展开全部（\(overview.files.count)）") { expanded.toggle() }.buttonStyle(.borderless)
         } content: {
             VStack(alignment: .leading, spacing: 6) {
-                if !overview.complete {
+                if !overview.unverifiedLegacy.isEmpty {
                     Notice(kind: .warning, text: "以下旧规则无法核对，它们可能放开没有列出的访问：\n" + overview.unverifiedLegacy.joined(separator: "\n"))
+                }
+                if !overview.unverifiedBaseRules.isEmpty {
+                    Notice(kind: .warning, text: "系统基础规则还提供程序运行所需的访问，尚未逐项列入此表：\n" + overview.unverifiedBaseRules.joined(separator: "\n"))
                 }
                 let shown = expanded ? overview.files : Array(overview.files.filter { !$0.redundant }.prefix(8))
                 ForEach(shown, id: \.self) { entry in
@@ -214,7 +217,9 @@ private struct EffectivePermissionsCard: View {
                         }
                         Spacer(minLength: 4)
                         if entry.readsSecrets { Chip(text: "可读取凭证", systemImage: "key.fill", tint: .red) }
-                        Text(entry.access == .readWrite ? "可修改" : "仅查看").font(.caption).foregroundStyle(.secondary)
+                        Text(entry.access == .readWrite
+                             ? (entry.ownAccess == .readOnly && !entry.overlapping.isEmpty ? "部分可修改" : "可修改")
+                             : "仅查看").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 if !expanded && overview.files.count > shown.count {
@@ -236,11 +241,15 @@ private struct EffectivePermissionsCard: View {
         } else if entry.redundant, let parent = entry.inherited.first {
             parts.append("已被 \(PathLabel.abbreviate(parent.path)) 覆盖")
         }
+        if !entry.overlapping.isEmpty {
+            parts.append("部分匹配位置也受这些授权影响：" + entry.overlapping.map { PathLabel.abbreviate($0.path) }.joined(separator: "、"))
+        }
         return "来源：" + parts.joined(separator: "、")
     }
 
     private func networkLine(_ overview: PermissionOverview) -> String {
-        var parts: [String] = [overview.network.outboundTCP == .allowed ? "可以联网（对外 TCP）" : "不能联网"]
+        if !overview.unverifiedNetwork.isEmpty { return "网络：旧规则或系统基础规则仍有未核对的网络授权，最终范围待确认；下方开关只表示显式设置。" }
+        var parts: [String] = [overview.network.outboundTCP == .allowed ? "可以联网（对外 TCP）" : "对外 TCP 未授权"]
         if !overview.ports.isEmpty { parts.append("可连接本机端口 " + overview.ports.map { String($0.port) }.joined(separator: "、")) }
         if overview.network.listen == .allowed { parts.append("可以接收连接") }
         if overview.network.udp == .allowed { parts.append("可以使用 UDP") }
@@ -248,6 +257,7 @@ private struct EffectivePermissionsCard: View {
     }
 
     private func execLine(_ overview: PermissionOverview) -> String {
+        if !overview.unverifiedExec.isEmpty { return "运行其他程序：旧规则或系统基础规则的授权范围待确认，程序列表可能不完整。" }
         if overview.unrestrictedExec { return "运行其他程序：任意程序（从旧安装迁移时保留）" }
         guard !overview.exec.isEmpty else { return "运行其他程序：不允许" }
         return "运行其他程序：" + overview.exec.map { PathLabel.abbreviate($0.path) }.joined(separator: "、")
@@ -677,6 +687,10 @@ private struct ProgramsAndNetworkCard: View {
         Card(title: "运行其他程序与网络", systemImage: "network",
              subtitle: "允许运行的其他程序、可连接的本机端口和网络范围。允许某个端口不代表授权该服务替它做的事。") {
             VStack(alignment: .leading, spacing: 14) {
+                let overview = model.overview(profile)
+                if !overview.unverifiedNetwork.isEmpty || !overview.unverifiedExec.isEmpty {
+                    Notice(kind: .warning, text: "下方列表和开关是显式设置。旧规则或系统基础规则可能继续授权，关闭开关或移除列表项不能保证完全收回。")
+                }
                 if profile.unrestrictedExec {
                     Notice(kind: .warning, text: "允许运行任意程序（从现有安装迁移时保留）。")
                 }

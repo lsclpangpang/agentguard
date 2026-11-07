@@ -109,7 +109,7 @@ public struct EffectivePolicy: Hashable, Sendable {
     /// Executables whose copies running outside AgentGuard count as unmanaged: the programs plus the
     /// launch executable.
     public var detectionTargets: [String] {
-        Array(Set(programs + (launch.map { [$0.executable] } ?? []))).sorted()
+        Array(Set(programs + (launch.map { [$0.detectionTarget] } ?? []))).sorted()
     }
 }
 
@@ -141,6 +141,7 @@ public struct PolicyCompiler: Sendable {
             launch?.executable = try canonical(settings.executable).value
             if let directory = settings.workingDirectory { launch?.workingDirectory = try canonical(directory).value }
             if let path = settings.originalPath { launch?.originalPath = try canonical(path).value }
+            if let path = settings.scriptPath { launch?.scriptPath = try canonical(path).value }
             if let label = settings.originalLabel, !Self.isSafeLaunchLabel(label) { throw CompileError.invalidLaunchLabel(label) }
         }
         let programs = Array(Set(try profile.programs.map { try canonical($0).value })).sorted()
@@ -336,6 +337,15 @@ public struct PolicyCompiler: Sendable {
         let protected = try environment.protectedPaths.map(canonical)
         let writeProtected = try environment.writeProtectedPaths.map(canonical)
         for grant in result {
+            if grant.access == .readOnly,
+               let writable = result.first(where: {
+                   $0.access == .readWrite && grant.pattern.overlaps($0.pattern, kind: .file, otherKind: $0.kind,
+                                                                    caseInsensitive: caseInsensitive)
+               }) {
+                // Compare the read-only pattern's matches, not all descendants of its directory
+                // matches: a read-only parent with an explicitly writable child remains valid.
+                throw CompileError.nestedReadOnlyInsideReadWrite(inner: grant.pattern.value, outer: writable.pattern.value)
+            }
             for area in protected where grant.pattern.mayReachInside(area, kind: grant.kind, caseInsensitive: caseInsensitive) {
                 throw CompileError.overlapsProtectedPath(grant: grant.pattern.value, protected: area.value)
             }

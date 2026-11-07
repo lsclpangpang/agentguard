@@ -207,7 +207,7 @@ final class HelperCore {
         let snapshot = service?.instances(ofProfile: profileID).first { $0.id == instance }
         processBirths[root] = startTime
         try? records.save(InstanceRecord(instance: instance, profileID: profileID, revision: revision, pid: root.pid, startTime: startTime,
-                                         supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false))
+                                         supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false, bootSessionID: ProcessFacts.bootSessionID))
     }
 
     func reconcileInstances() {
@@ -216,27 +216,53 @@ final class HelperCore {
         // 所以退出的判定也在这里做：进程真没了就把它从追踪表里摘掉。
         for profileID in ((try? config.store.profileIDs()) ?? []) {
             for instance in service.instances(ofProfile: profileID) {
-                for process in instance.liveProcesses where kill(process.pid, 0) != 0 {
-                    service.ingest(.exit(process))
+                for process in instance.liveProcesses {
+                    let current = ProcessFacts.startTime(pid: process.pid)
+                    if kill(process.pid, 0) != 0 {
+                        service.ingest(.exit(process))
+                        processBirths.removeValue(forKey: process)
+                    } else if let expected = processBirths[process], let current {
+                        if current != expected {
+                            service.ingest(.gap)
+                            service.ingest(.exit(process))
+                            processBirths.removeValue(forKey: process)
+                        }
+                    } else {
+                        // An unavailable identity is not evidence that the process exited.
+                        service.ingest(.gap)
+                    }
                 }
             }
         }
-        for record in ((try? records.all()) ?? []) {
-            // 进程没了、或者 pid 被复用（启动时刻对不上）就当作已退出，别把陌生进程算进来。
-            guard kill(record.pid, 0) == 0, ProcessFacts.startTime(pid: record.pid) == record.startTime else {
+        for var record in ((try? records.all()) ?? []) {
+            // Only a reboot, or a completely observed exit of the whole tree, proves that no
+            // descendants survive. A dead root alone cannot clear a restored instance's uncertainty.
+            if record.isFromEarlierBoot(current: ProcessFacts.bootSessionID) {
                 try? records.remove(profileID: record.profileID, instance: record.instance)
                 continue
             }
-            // 每个实例一份记录，同一配置档的多个副本各自恢复；已在追踪表里的不重复装回。
-            if service.instances(ofProfile: record.profileID).contains(where: { $0.id == record.instance }) { continue }
+            if record.bootSessionID == nil, let boot = ProcessFacts.bootSessionID {
+                record.bootSessionID = boot
+                try? records.save(record)
+            }
+            if let snapshot = service.instances(ofProfile: record.profileID).first(where: { $0.id == record.instance }) {
+                if !snapshot.isRunning && !snapshot.trackingIncomplete {
+                    try? records.remove(profileID: record.profileID, instance: record.instance)
+                }
+                continue
+            }
             let root = ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime))
             service.restoreInstance(id: record.instance, profileID: record.profileID, revision: record.revision, root: root,
                                     supervisedByLaunchd: record.supervisedByLaunchd)
-            processBirths[root] = record.startTime
+            if ProcessFacts.startTime(pid: record.pid) == record.startTime {
+                processBirths[root] = record.startTime
+            } else {
+                service.ingest(.exit(root))
+            }
         }
         // A restored instance's forks were never observed; find the ones still running by parent PID
         // so a stop reaches them. Daemons that were reparented stay unknown, which the status says.
-        for (key, birth) in service.adoptDescendants(of: ProcessFacts.allProcesses(), birth: ProcessFacts.startTime) {
+        for (key, birth) in service.adoptDescendants(of: ProcessFacts.allProcesses(), knownBirths: processBirths, birth: ProcessFacts.startTime) {
             processBirths[key] = birth
         }
     }
@@ -380,6 +406,7 @@ final class HelperCore {
     /// Stops the identity-checked targets and records what actually exited, merged into this
     /// request's outcome (an uninstall stops several profiles).
     private func stop(_ plan: ProcessStopPlan, profileID: String) {
+        let untrackedBefore = service?.instances(ofProfile: profileID).filter(\.trackingIncomplete).map(\.id) ?? []
         let targets = plan.targets
         func stillSame(_ pid: Int32) -> Bool { ProcessFacts.startTime(pid: pid) == targets[pid] }
         for pid in targets.keys where stillSame(pid) { kill(pid, SIGTERM) }
@@ -398,7 +425,8 @@ final class HelperCore {
         outcome.forced += lingering.filter { !survivors.contains($0) }
         outcome.survivors += survivors
         outcome.skipped += plan.skipped
-        outcome.untrackedInstances += service?.instances(ofProfile: profileID).filter(\.trackingIncomplete).map(\.id) ?? []
+        let untrackedAfter = service?.instances(ofProfile: profileID).filter(\.trackingIncomplete).map(\.id) ?? []
+        outcome.untrackedInstances = Array(Set(outcome.untrackedInstances + untrackedBefore + untrackedAfter)).sorted()
         operationStop = outcome
     }
 

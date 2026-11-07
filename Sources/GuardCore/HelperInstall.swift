@@ -57,8 +57,8 @@ public enum HelperInstallRepair: Equatable, Sendable {
     case register
     case reregister
 
-    public static func action(status: HelperInstallStatus, reachable: Bool) -> HelperInstallRepair {
-        guard !reachable else { return .none }
+    public static func action(status: HelperInstallStatus, reachable: Bool, outdated: Bool = false) -> HelperInstallRepair {
+        guard !reachable || outdated else { return .none }
         switch status {
         case .enabled: return .reregister
         case .notRegistered: return .register

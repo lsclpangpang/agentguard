@@ -47,7 +47,7 @@ extension AppModel {
         // Legacy rules are compared with literal paths; a pattern's reach is shown by the sandbox check instead.
         let legacy = grant.pattern ? nil : try? legacyRevocation(grant.path, keeping: nil, in: profile)
         var warnings: [String] = []
-        if check == nil && !grant.pattern {
+        if check == nil {
             // A grant whose path cannot be read is exactly the one to delete, so it is removed without the analysis.
             warnings.append("注意：\(grant.path) 不是可用的路径，无法核对其他授权是否仍允许访问它")
         }
@@ -78,6 +78,7 @@ extension AppModel {
         var lines = ["注意：以下授权仍允许\(revoked) \(path) 或其中的内容，这次修改不能完全收回："]
         lines += check.outerUserGrants.map { "  \($0.path)（你添加的\($0.access == .readWrite ? "读写" : "只读")授权，需要单独修改）" }
         lines += check.fixed.map { "  \($0.path)（\($0.source.displayName)）" }
+        lines += check.unverifiedRules.map { "  尚未核对的旧规则：\($0)" }
         return lines
     }
 

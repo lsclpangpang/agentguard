@@ -125,6 +125,10 @@ public enum MigrationPreview {
             lines.append("以下旧规则无法核对，会原样保留，迁移后会提示逐条处理：")
             lines += overview.unverifiedLegacy.map { "  " + $0 }
         }
+        if !overview.unverifiedBaseRules.isEmpty {
+            lines.append("系统基础规则尚未逐项核对，以上不是全部访问范围：")
+            lines += overview.unverifiedBaseRules.map { "  " + $0 }
+        }
         if !result.unimportedRules.isEmpty {
             lines.append("以下规则无法导入，不会生效，请在迁移后手动核对：")
             lines += result.unimportedRules.map { "  " + $0 }

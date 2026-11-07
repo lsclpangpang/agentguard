@@ -83,6 +83,45 @@ public struct PathPattern: Hashable, Sendable, CustomStringConvertible {
         Self.consumes(components[...], area.components[...], caseInsensitive: caseInsensitive)
     }
 
+    /// Whether the two grants share any concrete path. Walks the product of their glob
+    /// automata, including epsilon transitions for `*` / `**`; sampling is insufficient.
+    public func overlaps(_ other: PathPattern, kind: PathKind, otherKind: PathKind, caseInsensitive: Bool) -> Bool {
+        let a = components + (kind == .directory ? ["**"] : [])
+        let b = other.components + (otherKind == .directory ? ["**"] : [])
+        var pending = [[0, 0]], seen: Set<[Int]> = []
+        while let state = pending.popLast() {
+            guard seen.insert(state).inserted else { continue }
+            let i = state[0], j = state[1]
+            if i == a.count && j == b.count { return true }
+            if i < a.count && a[i] == "**" { pending.append([i + 1, j]) }
+            if j < b.count && b[j] == "**" { pending.append([i, j + 1]) }
+            guard i < a.count, j < b.count else { continue }
+            if Self.globsOverlap(a[i] == "**" ? "*" : a[i], b[j] == "**" ? "*" : b[j], caseInsensitive: caseInsensitive) {
+                pending.append([a[i] == "**" ? i : i + 1, b[j] == "**" ? j : j + 1])
+            }
+        }
+        return false
+    }
+
+    private static func globsOverlap(_ first: String, _ second: String, caseInsensitive: Bool) -> Bool {
+        let a = Array(caseInsensitive ? first.lowercased() : first)
+        let b = Array(caseInsensitive ? second.lowercased() : second)
+        // The third coordinate records whether a nonempty path component was consumed.
+        var pending = [[0, 0, 0]], seen: Set<[Int]> = []
+        while let state = pending.popLast() {
+            guard seen.insert(state).inserted else { continue }
+            let i = state[0], j = state[1], consumed = state[2]
+            if i == a.count && j == b.count && consumed == 1 { return true }
+            if i < a.count && a[i] == "*" { pending.append([i + 1, j, consumed]) }
+            if j < b.count && b[j] == "*" { pending.append([i, j + 1, consumed]) }
+            guard i < a.count, j < b.count else { continue }
+            if a[i] == "*" || a[i] == "?" || b[j] == "*" || b[j] == "?" || a[i] == b[j] {
+                pending.append([a[i] == "*" ? i : i + 1, b[j] == "*" ? j : j + 1, 1])
+            }
+        }
+        return false
+    }
+
     private static func consumes(_ pattern: ArraySlice<String>, _ path: ArraySlice<String>, caseInsensitive: Bool) -> Bool {
         guard let head = pattern.first else { return false }
         if path.isEmpty { return true }

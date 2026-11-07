@@ -8,6 +8,9 @@ import Foundation
 public struct ProgramSetupPlan: Equatable, Sendable {
     /// What to start: the real path, symlinks resolved.
     public var command: String
+    /// Pin a script's resolved interpreter for background launches, independent of launchd's PATH.
+    public var launchExecutable: String
+    public var launchArguments: [String]
     /// The executable to watch for unmanaged copies; nil for a script.
     public var program: String?
     /// Additional executables the program needs to start.
@@ -17,12 +20,21 @@ public struct ProgramSetupPlan: Equatable, Sendable {
     /// One line per extra permission, saying why it is needed.
     public var reasons: [String]
 
-    public init(command: String, program: String?, exec: [String] = [], files: [FileGrant] = [], reasons: [String] = []) {
+    public init(command: String, program: String?, exec: [String] = [], files: [FileGrant] = [], reasons: [String] = [],
+                launchExecutable: String? = nil, launchArguments: [String] = []) {
         self.command = command
         self.program = program
         self.exec = exec
         self.files = files
         self.reasons = reasons
+        self.launchExecutable = launchExecutable ?? command
+        self.launchArguments = launchArguments
+    }
+
+    public func launch(arguments: [String], workingDirectory: String?, runAtLogin: Bool) -> LaunchSettings {
+        LaunchSettings(executable: launchExecutable, arguments: launchArguments + arguments, workingDirectory: workingDirectory,
+                       originalLabel: nil, restartOnCleanExit: false, runAtLogin: runAtLogin,
+                       scriptPath: program == nil ? command : nil)
     }
 }
 
@@ -47,14 +59,16 @@ public enum ProgramSetup {
                                probe: some ProgramFileProbe) -> Result<ProgramSetupPlan, ProgramPathError> {
         var path = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if path.hasPrefix("~/") { path = home + path.dropFirst() }
-        guard let scriptReal = probe.realPath(path), let name,
-              let interpreter = locate(name, homebrewPrefix: homebrewPrefix, probe: probe),
+        guard let scriptReal = probe.realPath(path),
+              let header = probe.header(scriptReal, count: 512),
+              let shebang = ScriptShebang.parse(header),
+              let interpreter = locate(shebang.interpreter, homebrewPrefix: homebrewPrefix, probe: probe),
               case .success = ProgramPath.validate(interpreter, home: home, probe: probe)
         else { return .failure(.script(interpreter: name)) }
-        var plan = ProgramSetupPlan(command: scriptReal, program: nil, exec: [scriptReal, interpreter])
+        var plan = ProgramSetupPlan(command: scriptReal, program: nil, exec: [scriptReal, interpreter],
+                                    launchExecutable: interpreter, launchArguments: shebang.arguments + [scriptReal])
         plan.reasons.append("运行 \(interpreter)：这个程序是脚本，由它来执行")
-        let header = probe.header(scriptReal, count: 128) ?? Data()
-        if String(decoding: header.prefix { $0 != 0x0a }, as: UTF8.self).contains("/env ") {
+        if shebang.usesEnv {
             plan.exec.append("/usr/bin/env")
             plan.reasons.append("运行 /usr/bin/env：脚本通过它查找解释器")
         }
@@ -67,6 +81,8 @@ public enum ProgramSetup {
         if let keg = kegDirectory(of: interpreter, homebrewPrefix: homebrewPrefix) {
             plan.files.append(FileGrant(path: keg, kind: .directory, access: .readOnly))
             plan.reasons.append("读取 \(keg)：解释器的安装目录")
+        } else {
+            plan.files.append(FileGrant(path: interpreter, kind: .file, access: .readOnly))
         }
         return .success(plan)
     }
@@ -99,5 +115,40 @@ public enum ProgramSetup {
         let end = parts[index + 1].hasPrefix("@") ? index + 2 : index + 1
         guard end < parts.count - 1 else { return nil }
         return "/" + parts[...end].joined(separator: "/")
+    }
+}
+
+/// Supported shebang forms whose invocation can be preserved exactly. Environment assignments,
+/// env flags other than -S, and env -S expansions require user setup rather than silently changing
+/// their meaning while pinning an interpreter.
+struct ScriptShebang {
+    var interpreter: String
+    var arguments: [String]
+    var usesEnv: Bool
+
+    static func parse(_ header: Data) -> ScriptShebang? {
+        guard header.starts(with: Array("#!".utf8)),
+              header.contains(0x0a) || header.count < 512 else { return nil }
+        let line = String(decoding: header.dropFirst(2).prefix { $0 != 0x0a }, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
+        guard let first = parts.first, first.hasPrefix("/") else { return nil }
+        let tail = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
+        if first == "/usr/bin/env" {
+            var arguments: [String]
+            if tail.hasPrefix("-S ") || tail.hasPrefix("-S\t") {
+                let text = String(tail.dropFirst(3))
+                guard !text.contains("$"), !text.contains("\\"), let parsed = try? LaunchArguments.parse(text) else { return nil }
+                arguments = parsed
+            } else {
+                // Without -S env receives a single optional shebang argument.
+                guard !tail.contains(where: \.isWhitespace) else { return nil }
+                arguments = [tail]
+            }
+            guard let interpreter = arguments.first, !interpreter.isEmpty,
+                  !interpreter.hasPrefix("-"), !interpreter.contains("=") else { return nil }
+            return ScriptShebang(interpreter: interpreter, arguments: Array(arguments.dropFirst()), usesEnv: true)
+        }
+        return ScriptShebang(interpreter: String(first), arguments: tail.isEmpty ? [] : [tail], usesEnv: false)
     }
 }

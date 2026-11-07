@@ -41,9 +41,30 @@ final class AppModel: ObservableObject {
     @Published private(set) var clock = Date()
     private var pollTask: Task<Void, Never>?
     private var autoRefreshTask: Task<Void, Never>?
+    private var clockTask: Task<Void, Never>?
     /// One registration repair per launch; see `repairStaleRegistrationIfNeeded`.
     private var didAttemptRegistrationRepair = false
     private var registrationRepairTask: Task<Void, Never>?
+    private var manualInstallTask: Task<Void, Never>?
+    var helperMaintenance = HelperMaintenance(enabled: !UserDefaults.standard.bool(forKey: "helperRemovedByUser"))
+    @Published var uninstalling = false
+
+    /// Stop both scheduled work and the effects of requests already in flight.
+    func suspendHelperMaintenance() {
+        helperMaintenance.suspend()
+        UserDefaults.standard.set(true, forKey: "helperRemovedByUser")
+        didAttemptRegistrationRepair = true
+        autoRefreshTask?.cancel()
+        autoRefreshTask = nil
+        clockTask?.cancel()
+        clockTask = nil
+        pollTask?.cancel()
+        pollTask = nil
+        registrationRepairTask?.cancel()
+        registrationRepairTask = nil
+        manualInstallTask?.cancel()
+        manualInstallTask = nil
+    }
 
     let config: AgentGuardConfig
 
@@ -55,6 +76,9 @@ final class AppModel: ObservableObject {
     var templates: [Template] { config.templates }
 
     var overall: OverallStatus {
+        guard helperMaintenance.enabled else {
+            return OverallStatus(level: .attention, reasons: [uninstalling ? "正在卸载后台组件" : "后台维护已暂停；需要恢复使用时请在设置中点“检查并修复”"])
+        }
         // 失败时会保留上次的 report（避免详情页被拆掉重建），所以可达性要单独判断，
         // 否则菜单栏会一直显示上次的“均已生效”。
         guard helperReachable, let report else { return OverallStatus(level: .problem, reasons: ["无法连接 Helper"]) }
@@ -85,6 +109,7 @@ final class AppModel: ObservableObject {
     // MARK: Helper
 
     func refresh() {
+        guard helperMaintenance.enabled else { return }
         startAutoRefresh()
         Task { _ = await refreshReport() }
     }
@@ -92,18 +117,18 @@ final class AppModel: ObservableObject {
     /// Running programs change on their own, so the status is asked for again every few seconds
     /// rather than only after the user acts. Pending items are left to explicit refreshes.
     private func startAutoRefresh() {
-        guard autoRefreshTask == nil else { return }
+        guard helperMaintenance.enabled, autoRefreshTask == nil else { return }
         autoRefreshTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard let self else { return }
+                guard !Task.isCancelled, let self, self.helperMaintenance.enabled else { return }
                 _ = await self.refreshReport(timeout: 10, includePending: false)
             }
         }
-        Task { @MainActor [weak self] in
+        clockTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard let self else { return }
+                guard !Task.isCancelled, let self, self.helperMaintenance.enabled else { return }
                 self.clock = Date()
             }
         }
@@ -111,14 +136,17 @@ final class AppModel: ObservableObject {
 
     /// Returns this request's snapshot, rather than the previous report cached by the UI.
     func refreshReport(timeout: TimeInterval = 60, includePending: Bool = true) async -> StatusReport? {
+        let generation = helperMaintenance.generation
+        guard helperMaintenance.accepts(generation), !Task.isCancelled else { return nil }
         let status = await Task.detached {
             try? HelperClient().send(.status, timeout: timeout)
         }.value
+        guard helperMaintenance.accepts(generation), !Task.isCancelled else { return nil }
         if case let .status(report) = status {
             self.report = report
             helperReachable = true
             statusConfirmedAt = Date()
-            installNotice = nil
+            if report.helperProtocol >= HelperProtocol.version { installNotice = nil }
         } else {
             // Preserve the last report during a failed query so the selected detail is not rebuilt.
             helperReachable = false
@@ -130,9 +158,12 @@ final class AppModel: ObservableObject {
         // Pending-item retrieval must not delay a caller waiting for the actual status snapshot.
         Task.detached {
             for profile in report.profiles {
+                guard await MainActor.run(body: { self.helperMaintenance.accepts(generation) }) else { return }
                 let items = try? HelperClient().send(.pendingItems(profileID: profile.profileID))
                 if case let .pendingItems(list) = items {
-                    await MainActor.run { self.pending[profile.profileID] = list }
+                    await MainActor.run {
+                        if self.helperMaintenance.accepts(generation) { self.pending[profile.profileID] = list }
+                    }
                 }
             }
         }
@@ -140,29 +171,51 @@ final class AppModel: ObservableObject {
     }
 
     func installHelper() {
-        let service = SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName)
-        // 用户手动触发，别再让自动修复重复登记。
+        guard !uninstalling else { return }
+        suspendHelperMaintenance()
+        helperMaintenance.resume()
+        UserDefaults.standard.set(false, forKey: "helperRemovedByUser")
         didAttemptRegistrationRepair = true
-        present(register(service), service, openSettings: true)
-        pollUntilReachable()
+        let generation = helperMaintenance.generation
+        manualInstallTask = Task { @MainActor in
+            // Use a fresh response: a reachable Helper can still be an older installed binary.
+            _ = await refreshReport(timeout: 5, includePending: false)
+            guard !Task.isCancelled, helperMaintenance.accepts(generation) else { return }
+            let service = SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName)
+            let outdated = helperOutdated
+            let error = await register(service, outdated: outdated)
+            guard !Task.isCancelled, helperMaintenance.accepts(generation) else { return }
+            present(error, service, openSettings: true)
+            if outdated && error == nil && service.status == .enabled {
+                helperReachable = false
+                statusConfirmedAt = nil
+                installNotice = "正在更新后台服务，等待新版本确认…"
+            }
+            manualInstallTask = nil
+            pollUntilReachable()
+        }
     }
 
     /// A registered daemon keeps the launch constraint recorded when it was registered, so an
     /// ad-hoc re-signed build leaves a job that launchd can never spawn. Registering again once per
     /// launch is what makes a rebuilt app work without a trip to System Settings.
     private func repairStaleRegistrationIfNeeded() {
-        guard !didAttemptRegistrationRepair, registrationRepairTask == nil else { return }
+        guard helperMaintenance.enabled, !didAttemptRegistrationRepair, registrationRepairTask == nil else { return }
         let service = SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName)
         guard HelperInstallRepair.action(status: Self.installStatus(service.status), reachable: helperReachable) != .none else {
             return
         }
         // 给刚启动的 Helper 一点时间：一次连接失败可能只是启动竞争，那样不该动 BTM。
+        let generation = helperMaintenance.generation
         registrationRepairTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, helperMaintenance.accepts(generation) else { return }
             registrationRepairTask = nil
             guard !helperReachable else { return }
             didAttemptRegistrationRepair = true
-            present(register(service), service, openSettings: false)
+            let error = await register(service)
+            guard !Task.isCancelled, helperMaintenance.accepts(generation) else { return }
+            present(error, service, openSettings: false)
             pollUntilReachable()
         }
     }
@@ -170,13 +223,19 @@ final class AppModel: ObservableObject {
     /// Registers (or re-registers) the Helper and returns the classification of a refusal. smd
     /// refusing a pending item with EPERM is not a failure: the item is registered and waits for the
     /// user to allow it.
-    private func register(_ service: SMAppService) -> HelperRegisterError? {
-        switch HelperInstallRepair.action(status: Self.installStatus(service.status), reachable: helperReachable) {
+    private func register(_ service: SMAppService, outdated: Bool = false) async -> HelperRegisterError? {
+        guard helperMaintenance.enabled else { return nil }
+        let generation = helperMaintenance.generation
+        switch HelperInstallRepair.action(status: Self.installStatus(service.status), reachable: helperReachable, outdated: outdated) {
         case .reregister:
-            try? service.unregister()
+            // The asynchronous variant completes only after the previous process is killed;
+            // the synchronous unregister returns too early to safely re-register an update.
+            do { try await service.unregister() }
+            catch { return .other("移除旧后台服务失败：\(error.localizedDescription)") }
         case .register, .none:
             break
         }
+        guard !Task.isCancelled, helperMaintenance.accepts(generation) else { return nil }
         switch Self.installStatus(service.status) {
         case .enabled, .requiresApproval:
             return nil
@@ -192,6 +251,9 @@ final class AppModel: ObservableObject {
     }
 
     private func present(_ registerError: HelperRegisterError?, _ service: SMAppService, openSettings: Bool) {
+        if case let .other(message) = registerError {
+            lastError = "后台服务修复失败：\(message)"
+        }
         // 登记被拒且条目已经在登录项里：这是“被关掉了”，不是签名或 plist 的错误。
         if registerError == .notPermitted, Self.installStatus(service.status) != .requiresApproval {
             installNotice = HelperInstallRepair.appReregistrationGuide
@@ -217,10 +279,16 @@ final class AppModel: ObservableObject {
         pollTask?.cancel()
         pollTask = Task { @MainActor in
             for _ in 0..<30 {
-                refresh()
+                guard !Task.isCancelled, helperMaintenance.enabled else { return }
+                _ = await refreshReport(timeout: 2, includePending: false)
+                guard !Task.isCancelled, helperMaintenance.enabled else { return }
+                if helperReachable && !helperOutdated { startAutoRefresh(); return }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if helperReachable || Task.isCancelled { break }
             }
+            guard !Task.isCancelled, helperMaintenance.enabled else { return }
+            installNotice = helperOutdated ? "后台服务仍是旧版本，更新尚未确认。请检查后台项目的系统授权后重试。"
+                                          : "尚未连接到后台服务，请检查后台项目的系统授权。"
+            startAutoRefresh()
         }
     }
 
@@ -263,7 +331,10 @@ final class AppModel: ObservableObject {
             lastError = unchangedHint ?? "没有变化"
             return .unchanged
         }
-        guard await askConfirmation("确认权限变更：\(profile.id)", warnings + info.summary) else { return .cancelled }
+        let legacyWarnings = self.profile(profile.id).map {
+            LegacyRuleAnalysis.revocationWarnings(from: $0, to: profile, environment: config.environment)
+        } ?? []
+        guard await askConfirmation("确认权限变更：\(profile.id)", warnings + legacyWarnings + info.summary) else { return .cancelled }
         let result = await Task.detached { () -> Result<HelperResponse, Error> in
             Result {
                 var token: Data?
@@ -507,7 +578,7 @@ final class AppModel: ObservableObject {
                 let remaining = deadline.timeIntervalSinceNow
                 guard remaining > 0, let snapshot = await refreshReport(timeout: remaining) else { break }
                 if snapshot.profiles.first(where: { $0.profileID == id })?.revisionState == .applied(running: true) {
-                    lastNotice = [lastNotice, restart ? "\(id) 已重启，当前权限已生效，旧权限已收回。可以重新尝试之前失败的操作。" : "\(id) 已启动，当前权限已生效。"]
+                    lastNotice = [lastNotice, restart ? "\(id) 已重启，当前修订已加载，已确认旧运行副本退出。可以重新尝试之前失败的操作。" : "\(id) 已启动，当前修订已加载。"]
                         .compactMap { $0 }.joined(separator: "\n")
                     break
                 }

@@ -9,14 +9,22 @@ public struct InstanceRecord: Codable, Equatable, Sendable {
     public var pid: Int32
     public var startTime: UInt64
     public var supervisedByLaunchd: Bool
+    public var bootSessionID: String?
 
-    public init(instance: Int, profileID: String, revision: Int, pid: Int32, startTime: UInt64, supervisedByLaunchd: Bool) {
+    public init(instance: Int, profileID: String, revision: Int, pid: Int32, startTime: UInt64, supervisedByLaunchd: Bool,
+                bootSessionID: String? = nil) {
         self.instance = instance
         self.profileID = profileID
         self.revision = revision
         self.pid = pid
         self.startTime = startTime
         self.supervisedByLaunchd = supervisedByLaunchd
+        self.bootSessionID = bootSessionID
+    }
+
+    public func isFromEarlierBoot(current: String?) -> Bool {
+        guard let recorded = bootSessionID, let current else { return false }
+        return recorded != current
     }
 }
 

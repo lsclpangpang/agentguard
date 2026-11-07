@@ -56,7 +56,7 @@ public enum HelperRequest: Codable, Equatable, Sendable {
 
 /// Bumped whenever the App and the Helper must be updated together; the App compares it with its own.
 public enum HelperProtocol {
-    public static let version = 2
+    public static let version = 3
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -381,8 +381,9 @@ public final class HelperService {
     }
 
     /// See `InstanceTracker.adoptDescendants`; returns the birth time of each process taken in.
-    public func adoptDescendants(of processes: [RunningProcess], birth: (Int32) -> UInt64?) -> [ProcessKey: UInt64] {
-        tracker.adoptDescendants(of: processes, birth: birth)
+    public func adoptDescendants(of processes: [RunningProcess], knownBirths: [ProcessKey: UInt64],
+                                 birth: (Int32) -> UInt64?) -> [ProcessKey: UInt64] {
+        tracker.adoptDescendants(of: processes, knownBirths: knownBirths, birth: birth)
     }
 
     public func managedInstance(of process: ProcessKey) -> Int? {
