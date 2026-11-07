@@ -133,6 +133,10 @@ struct ActivityTab: View {
             Card(title: "处理记录", systemImage: "clock.arrow.circlepath",
                  subtitle: "权限变更、启动和停止、保护确认，以及你对每项活动的处理。") {
                 VStack(alignment: .leading, spacing: 8) {
+                    if !(model.status(for: profileID)?.untrackedInstances.isEmpty ?? true) {
+                        Text("跟踪记录有缺口时，历史中的“已退出”只确认当时已跟踪的进程，不能证明遗漏的子进程也已退出。")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                     ForEach(Array(history.prefix(50).enumerated()), id: \.offset) { _, entry in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Image(systemName: entry.kind.symbol).foregroundStyle(entry.kind.tint).frame(width: 16)

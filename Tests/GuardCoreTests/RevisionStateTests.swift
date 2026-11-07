@@ -41,6 +41,17 @@ import Testing
         #expect(s == .unconfirmed(instances: [1]))
     }
 
+    @Test func knownProcessStateKeepsFailuresAndOldRevisionsVisible() {
+        let snapshots = [snap(1, rev: 4, live: [], confirmed: false), snap(2, rev: 5, live: [p3])]
+        #expect(RevisionState.evaluateKnownProcesses(savedRevision: 5, instances: snapshots, verified: [2: true]) == .applied(running: true))
+        #expect(RevisionState.evaluateKnownProcesses(savedRevision: 5, instances: snapshots, verified: [:]) == .awaitingVerification)
+        #expect(RevisionState.evaluateKnownProcesses(savedRevision: 5, instances: snapshots, verified: [2: false]) == .verificationFailed)
+        let old = [snap(1, rev: 4, live: [p1], confirmed: false)]
+        #expect(RevisionState.evaluateKnownProcesses(savedRevision: 5, instances: old, verified: [1: true])
+                == .oldInstancesAlive(residual: [p1], newInstanceRunning: false))
+        #expect(RevisionState.evaluate(savedRevision: 5, instances: old, verified: [1: false]) == .verificationFailed)
+    }
+
     @Test func newInstanceMustPassVerification() {
         let instances = [snap(1, rev: 4, live: []), snap(2, rev: 5, live: [p3])]
         #expect(RevisionState.evaluate(savedRevision: 5, instances: instances, verified: [:]) == .awaitingVerification)

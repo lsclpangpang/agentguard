@@ -79,7 +79,7 @@ extension RevisionState {
         case .applied(running: true): return "当前权限已生效"
         case .applied(running: false): return "未运行"
         case let .oldInstancesAlive(residual, _): return "运行中 · 权限待更新（旧副本还有 \(residual.count) 个进程）"
-        case .unconfirmed: return "暂时无法确认旧副本是否已退出"
+        case .unconfirmed: return "子进程跟踪记录不完整"
         case .awaitingVerification: return "正在确认保护"
         case .verificationFailed: return "保护未通过确认"
         case .inconsistent: return "运行中的权限与保存的不一致"
@@ -88,6 +88,14 @@ extension RevisionState {
 }
 
 extension Mode {
+    public var configurationName: String {
+        switch self {
+        case .enforce: return "限制未授权访问"
+        case .restrictedLearning: return "限制未授权访问，并记录更多活动"
+        case .unprotectedObserve: return "只记录，不限制访问"
+        }
+    }
+
     public var displayName: String {
         switch self {
         case .enforce: return "保护中"
@@ -132,21 +140,19 @@ public struct ProgramStatusSummary: Equatable, Sendable {
                                         next: nil, level: .problem)
         }
         var summary: ProgramStatusSummary
-        switch status.revisionState {
-        case .applied(running: true) where !status.untrackedInstances.isEmpty:
-            summary = ProgramStatusSummary(headline: "运行中 · 暂时无法确认所有运行副本",
-                                           impact: "Helper 重启或活动记录中断前启动的子程序可能没有被跟踪，不能确认它们都受这份权限限制。",
-                                           next: .restart, level: .attention)
+        switch status.runtimeRevisionState ?? status.revisionState {
         case .applied(running: true):
-            summary = ProgramStatusSummary(headline: "运行中 · 当前权限已生效", impact: "已从外部核对，\(programName) 按下面的权限运行。", next: nil, level: .allGood)
+            summary = ProgramStatusSummary(headline: "运行中 · 当前副本的权限检查已通过",
+                                           impact: "已核对当前已知副本使用的权限修订和可检查的访问限制。", next: nil, level: .allGood)
         case .applied(running: false):
-            summary = ProgramStatusSummary(headline: "未运行", impact: "启动后按下面的权限运行。", next: hasLaunch ? .start : nil, level: .allGood)
+            summary = ProgramStatusSummary(headline: status.untrackedInstances.isEmpty ? "未运行" : "未发现仍在运行的已知进程",
+                                           impact: "启动后按下面的权限运行。", next: hasLaunch ? .start : nil, level: .allGood)
         case .oldInstancesAlive:
             summary = ProgramStatusSummary(headline: "运行中 · 权限待更新",
-                                           impact: "新权限已保存，但 \(programName) 仍在使用之前的权限。重启 \(programName) 后生效，旧权限才会收回。",
+                                           impact: "新权限已保存，但仍有已知进程使用之前的权限。重启 \(programName) 可让这些进程加载新权限。",
                                            next: hasLaunch ? .restartAndApply : .restart, level: .attention)
         case .unconfirmed:
-            summary = ProgramStatusSummary(headline: "暂时无法确认旧副本是否已退出",
+            summary = ProgramStatusSummary(headline: "子进程跟踪记录不完整",
                                            impact: "活动记录中断，旧权限可能仍在被使用。", next: .checkAndRecover, level: .attention)
         case .awaitingVerification:
             summary = status.verificationPending.isEmpty
@@ -159,6 +165,14 @@ public struct ProgramStatusSummary: Equatable, Sendable {
         case .inconsistent:
             summary = ProgramStatusSummary(headline: "运行中的权限与保存的不一致", impact: "无法确认 \(programName) 当前受到的限制。",
                                            next: .restart, level: .problem)
+        }
+        if !status.untrackedInstances.isEmpty {
+            summary.impact += " 另有子进程跟踪记录不完整，详见下方；当前检查通过不代表所有旧权限已经收回。"
+            if summary.level == .allGood { summary.level = .attention }
+            if summary.next == nil { summary.next = .checkAndRecover }
+        }
+        if !status.verificationDeferred.isEmpty {
+            summary.impact += " 尚未出现的授权路径会在出现后自动补查。"
         }
         if !status.unmanagedProcesses.isEmpty {
             summary.impact += " 另有 \(status.unmanagedProcesses.count) 个副本没有经过 AgentGuard 运行，不受保护。"
@@ -175,7 +189,7 @@ extension ProgramStatusSummary.Next {
         case .start: return "启动程序"
         case .restartAndApply: return "重启并应用"
         case .restart: return "重启程序"
-        case .checkAndRecover: return "检查并恢复"
+        case .checkAndRecover: return "重新检查状态"
         case .stopUnmanaged: return "查看未受保护的副本"
         }
     }

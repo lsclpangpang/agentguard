@@ -10,11 +10,11 @@ import Testing
     let store = ProfileStore(root: "/store", files: InMemoryFileStore())
     let activity = ActivityStore(root: "/store", files: InMemoryFileStore())
 
-    func service(accept: Bool = true) throws -> HelperService {
+    func service(accept: Bool = true, probe: (any SandboxProbe)? = nil) throws -> HelperService {
         var counter = 0
         let s = HelperService(store: store, environment: F.environment, catalog: TemplateCatalog([]), trust: F.trust,
                               verifier: FakeVerifier(accept: accept), settings: F.helperSettings, clock: { Date(timeIntervalSince1970: 1_800_000_000) },
-                              makeID: { counter += 1; return "c\(counter)" }, activity: activity)
+                              makeID: { counter += 1; return "c\(counter)" }, probe: probe, activity: activity)
         guard case let .pending(info) = s.handle(.proposeChange(profile: F.profile(files: [F.rw("/Users/me/work")])), caller: F.appCaller, process: appProcess) else {
             Issue.record("proposal failed"); return s
         }
@@ -75,6 +75,21 @@ import Testing
         let titles = log(s)?.history.map(\.title) ?? []
         #expect(titles == ["运行副本 #1 已启动", "权限已保存为修订 1"])
         #expect(log(s)?.history.last?.details == ["+ 读写目录 /Users/me/work"])
+    }
+
+    @Test func stoppedHistoryDoesNotClaimUnobservedChildrenExited() throws {
+        let probe = FakeProbe()
+        probe.writable = ["/Users/me/work"]
+        let s = try service(probe: probe)
+        s.ingest(.gap)
+        s.ingest(.exit(cliProcess))
+        s.verifyInstances()
+        let entry = try #require(log(s)?.history.first { $0.kind == .stopped })
+        #expect(entry.title == "副本 #1 的已跟踪进程已退出")
+        #expect(entry.details.contains { $0.contains("不能据此确认所有子进程") })
+        #expect(s.instances(ofProfile: "knodo").first?.trackingIncomplete == true)
+        s.verifyInstances()
+        #expect(log(s)?.history.filter { $0.kind == .stopped }.count == 1)
     }
 
     @Test func loginSettingNeedsNoRevision() throws {
@@ -161,7 +176,7 @@ import Testing
     @Test func stopOutcomeSaysWhatIsUnconfirmed() {
         let complete = StopOutcome(stopped: [3, 1], forced: [2])
         #expect(complete.isComplete)
-        #expect(complete.confirmed == ["已停止 3 个受管进程（PID 1、2、3）", "其中 PID 2 没有及时退出，已强制结束"])
+        #expect(complete.confirmed == ["已停止本次跟踪到的 3 个进程（PID 1、2、3）", "其中 PID 2 没有及时退出，已强制结束"])
         let partial = StopOutcome(stopped: [1], survivors: [4], skipped: [5], untrackedInstances: [2])
         #expect(!partial.isComplete)
         #expect(partial.unconfirmed.count == 3)

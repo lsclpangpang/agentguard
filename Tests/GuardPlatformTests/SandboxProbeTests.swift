@@ -81,7 +81,10 @@ import Testing
 
         let absent = SandboxExpectation(operation: .fileWrite, target: rw + "/missing", allowed: true, failure: "write refused")
         #expect(SandboxVerification.verify(pid: pid, expectations: expected + [absent], probe: probe)
-                == .inconclusive(["路径暂不存在，尚未核验：" + rw + "/missing"]))
+                == .passedWithDeferred([rw + "/missing"]))
+        let absentDenied = SandboxExpectation(operation: .fileWrite, target: denied + "/missing", allowed: false, failure: "write allowed")
+        #expect(SandboxVerification.verify(pid: pid, expectations: expected + [absent, absentDenied], probe: probe)
+                == .inconclusive(["路径暂不存在，尚未核验限制：" + denied + "/missing"]))
         try Data().write(to: URL(fileURLWithPath: rw + "/missing"))
         #expect(SandboxVerification.verify(pid: pid, expectations: expected + [absent], probe: probe) == .passed)
     }

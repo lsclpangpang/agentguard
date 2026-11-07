@@ -98,9 +98,18 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
         for allowed in [true, false] {
             let expected = [SandboxExpectation(operation: .fileRead, target: "/missing", allowed: allowed, failure: "mismatch"),
                             SandboxExpectation(operation: .fileWrite, target: "/missing", allowed: allowed, failure: "mismatch")]
-            #expect(SandboxVerification.verify(pid: 7, expectations: expected, probe: probe)
-                    == .inconclusive(["路径暂不存在，尚未核验：/missing"]))
+            let verdict = SandboxVerification.verify(pid: 7, expectations: expected, probe: probe)
+            #expect(verdict == (allowed ? .passedWithDeferred(["/missing"])
+                               : .inconclusive(["路径暂不存在，尚未核验限制：/missing"])))
         }
+    }
+
+    @Test func absentReadOnlyGrantStillNeedsItsWriteDenialChecked() throws {
+        let probe = FakeProbe()
+        probe.missing = ["/Users/me/docs"]
+        let policy = try F.compile(F.profile(files: [F.ro("/Users/me/docs")]))
+        #expect(SandboxVerification.verify(pid: 7, expectations: SandboxVerification.expectations(for: policy, environment: F.environment),
+                                           probe: probe) == .inconclusive(["路径暂不存在，尚未核验限制：/Users/me/docs"]))
     }
 
     @Test func missingPathDoesNotConcealARealMismatch() {
@@ -189,6 +198,9 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
         let s = try service(probe: probe)
         s.restoreInstance(id: 4, profileID: "knodo", revision: 1, root: ProcessKey(pid: 30, version: 9), supervisedByLaunchd: true)
         #expect(status(s)?.revisionState == .unconfirmed(instances: [4]))
+        #expect(status(s)?.runtimeRevisionState == .applied(running: true))
+        #expect(status(s)?.activeTrackingGaps == [4])
+        #expect(status(s)?.runtimeInstances.first?.checkedPID == 30)
         #expect(status(s)?.verificationIssues.isEmpty == true)
         guard case let .registered(instance, _) = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.cliCaller,
                                                            process: ProcessKey(pid: 40, version: 1)) else {
@@ -227,16 +239,38 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
         #expect(status(s)?.verificationIssues.isEmpty == true)
         probe.missing = ["/Users/me/work"]
         clock.now = clock.now.addingTimeInterval(HelperService.verificationRetryInterval)
-        #expect(status(s)?.revisionState == .awaitingVerification)
+        #expect(status(s)?.revisionState == .applied(running: true))
         #expect(status(s)?.verificationIssues.isEmpty == true)
-        #expect(status(s)?.verificationPending == ["路径暂不存在，尚未核验：/Users/me/work"])
+        #expect(status(s)?.verificationPending.isEmpty == true)
+        #expect(status(s)?.verificationDeferred == ["/Users/me/work"])
         probe.missing = []
         clock.now = clock.now.addingTimeInterval(HelperService.verificationRetryInterval)
         #expect(status(s)?.revisionState == .applied(running: true))
         #expect(status(s)?.verificationPending.isEmpty == true)
+        #expect(status(s)?.verificationDeferred.isEmpty == true)
         probe.writable = []
         clock.now = clock.now.addingTimeInterval(HelperService.verificationRetryInterval)
         #expect(status(s)?.revisionState == .verificationFailed)
+        #expect(status(s)?.verificationDeferred.isEmpty == true)
+    }
+
+    @Test func historicalGapDoesNotHideNewInstanceVerificationOrGetCleared() throws {
+        let probe = FakeProbe()
+        probe.writable = ["/Users/me/work"]
+        let s = try service(probe: probe)
+        let oldRoot = ProcessKey(pid: 20, version: 1)
+        s.restoreInstance(id: 1, profileID: "knodo", revision: 1, root: oldRoot, supervisedByLaunchd: true)
+        s.ingest(.exit(oldRoot))
+        _ = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.cliCaller, process: ProcessKey(pid: 40, version: 1))
+        let report = try #require(status(s))
+        #expect(report.revisionState == .unconfirmed(instances: [1]))
+        #expect(!report.revisionState.isComplete)
+        #expect(report.runtimeRevisionState == .applied(running: true))
+        #expect(report.historicalTrackingGaps == [1])
+        #expect(report.activeTrackingGaps.isEmpty)
+        #expect(report.runtimeInstances.map(\.knownPIDs) == [[40]])
+        #expect(report.runtimeInstances.first?.verified == true)
+        #expect(s.instances(ofProfile: "knodo").first?.trackingIncomplete == true)
     }
 
     @Test func oldReportsWithoutPendingChecksStillDecode() throws {
@@ -244,8 +278,14 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
                                          runningInstances: [1], pendingCount: 0)
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any])
         object.removeValue(forKey: "verificationPending")
+        object.removeValue(forKey: "verificationDeferred")
+        object.removeValue(forKey: "runtimeRevisionState")
+        object.removeValue(forKey: "runtimeInstances")
         let decoded = try JSONDecoder().decode(ProfileStatusReport.self, from: JSONSerialization.data(withJSONObject: object))
         #expect(decoded.verificationPending.isEmpty)
+        #expect(decoded.verificationDeferred.isEmpty)
+        #expect(decoded.runtimeRevisionState == nil)
+        #expect(decoded.runtimeInstances.isEmpty)
     }
 }
 

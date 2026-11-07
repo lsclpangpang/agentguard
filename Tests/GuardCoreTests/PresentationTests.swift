@@ -13,7 +13,7 @@ import Testing
         #expect(RevisionState.applied(running: true).displayText == "当前权限已生效")
         #expect(RevisionState.applied(running: false).displayText == "未运行")
         #expect(RevisionState.oldInstancesAlive(residual: [ProcessKey(pid: 1, version: 1), ProcessKey(pid: 2, version: 1)], newInstanceRunning: true).displayText == "运行中 · 权限待更新（旧副本还有 2 个进程）")
-        #expect(RevisionState.unconfirmed(instances: [3]).displayText == "暂时无法确认旧副本是否已退出")
+        #expect(RevisionState.unconfirmed(instances: [3]).displayText == "子进程跟踪记录不完整")
         #expect(RevisionState.awaitingVerification.displayText == "正在确认保护")
         #expect(RevisionState.verificationFailed.displayText == "保护未通过确认")
         #expect(RevisionState.inconsistent.displayText == "运行中的权限与保存的不一致")
@@ -78,7 +78,7 @@ import Testing
         let s = ProgramStatusSummary.evaluate(status(.oldInstancesAlive(residual: [ProcessKey(pid: 1, version: 1)], newInstanceRunning: false)),
                                               freshness: .current, programName: "Knodo", hasLaunch: true)
         #expect(s.headline == "运行中 · 权限待更新")
-        #expect(s.impact.contains("重启 Knodo 后生效"))
+        #expect(s.impact.contains("重启 Knodo 可让这些进程加载新权限"))
         #expect(s.next == .restartAndApply)
     }
 
@@ -100,13 +100,14 @@ import Testing
 
     @Test func untrackedCopiesAreNotClaimedProtected() {
         let s = ProgramStatusSummary.evaluate(status(.applied(running: true), untracked: [1]), freshness: .current, programName: "Knodo", hasLaunch: true)
-        #expect(s.level == .attention && s.next == .restart)
+        #expect(s.level == .attention && s.next == .checkAndRecover)
+        #expect(s.impact.contains("不代表所有旧权限已经收回"))
     }
 
     @Test func unmanagedCopiesAreAProblem() {
         let s = ProgramStatusSummary.evaluate(status(.applied(running: true), unmanaged: [9]), freshness: .current, programName: "Knodo", hasLaunch: true)
         #expect(s.level == .problem && s.next == .stopUnmanaged)
-        #expect(s.headline == "运行中 · 当前权限已生效")
+        #expect(s.headline == "运行中 · 当前副本的权限检查已通过")
     }
 
     @Test func missingPathsArePendingAndDoNotRecommendRestart() {
@@ -116,5 +117,19 @@ import Testing
         #expect(s.headline == "部分权限暂未确认" && s.level == .attention)
         #expect(s.next == .checkAndRecover)
         #expect(s.impact.contains("自动重新检查"))
+    }
+
+    @Test func currentVerificationAndHistoricalGapAreBothVisible() {
+        var report = status(.unconfirmed(instances: [1]), untracked: [1])
+        report.runtimeRevisionState = .applied(running: true)
+        report.runningInstances = [4]
+        report.verificationDeferred = ["/tmp/transient.lock"]
+        let s = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
+        #expect(s.headline == "运行中 · 当前副本的权限检查已通过")
+        #expect(s.level == .attention && s.next == .checkAndRecover)
+        #expect(s.impact.contains("跟踪记录不完整"))
+        #expect(s.impact.contains("出现后自动补查"))
+        report.runtimeRevisionState = .verificationFailed
+        #expect(ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true).level == .problem)
     }
 }

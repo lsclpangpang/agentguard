@@ -40,6 +40,9 @@ public protocol SandboxProbe: Sendable {
 
 public enum SandboxVerdict: Equatable, Sendable {
     case passed
+    /// All available checks passed. Only positive grants refer to paths not present yet.
+    /// This does not establish access to those paths; it does not defer any denial boundary.
+    case passedWithDeferred([String])
     case failed([String])
     /// No mismatch was established, but some checks could not be completed.
     case inconclusive([String])
@@ -104,10 +107,15 @@ public enum SandboxVerification {
         guard sandboxed else { return .notSandboxed }
         var failures: [String] = []
         var pending: [String] = []
+        var deferred: [String] = []
         for expectation in expectations {
             switch probe.check(pid: pid, operation: expectation.operation, target: expectation.target) {
             case .missing:
-                pending.append("路径暂不存在，尚未核验：\(expectation.target)")
+                if expectation.allowed {
+                    deferred.append(expectation.target)
+                } else {
+                    pending.append("路径暂不存在，尚未核验限制：\(expectation.target)")
+                }
             case .unavailable:
                 pending.append("系统暂时无法核验：\(expectation.target)")
             case .allowed where !expectation.allowed, .denied where expectation.allowed: failures.append(expectation.failure)
@@ -118,7 +126,9 @@ public enum SandboxVerification {
         // untestable denial into a successful boundary check.
         if !failures.isEmpty { return .failed(failures) }
         var seen: Set<String> = []
-        return pending.isEmpty ? .passed : .inconclusive(pending.filter { seen.insert($0).inserted })
+        if !pending.isEmpty { return .inconclusive(pending.filter { seen.insert($0).inserted }) }
+        if !deferred.isEmpty { return .passedWithDeferred(deferred.filter { seen.insert($0).inserted }) }
+        return .passed
     }
 
     /// Prefer real system directories, outside the explicit grants, for the default-deny check.
