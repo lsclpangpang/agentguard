@@ -58,6 +58,32 @@ import Testing
         #expect(pending(s).first { $0.suggestion == .outboundTCP }?.samples == ["203.0.113.10:443"])
     }
 
+    @Test func signalRefusalsRemainVisibleAndCreateAnActionablePendingItem() throws {
+        let s = try service()
+        let target = "children [claude(67184)] signum:9"
+        s.observe(denial: try #require(SandboxLogParser.parse("Sandbox: agent(20) deny(1) signal \(target)")))
+        let recent = try #require(log(s)?.recent)
+        #expect(recent.count == 1)
+        #expect(recent.first?.denied == true)
+        #expect(recent.first?.processName == "agent")
+        #expect(recent.first?.pid == 20)
+        #expect(recent.first?.access == .signal(target: target))
+        #expect(pending(s).map(\.suggestion) == [.processControl])
+    }
+
+    @Test func unknownSignalTargetsStayVisibleWithoutAProposedExpansion() throws {
+        let s = try service()
+        let target = "others [Finder(300)] signum:9"
+        s.observe(denial: try #require(SandboxLogParser.parse("Sandbox: agent(20) deny(1) signal \(target)")))
+        s.observe(denial: try #require(SandboxLogParser.parse("Sandbox: other(999) deny(1) signal children [other(301)] signum:9")))
+        let recent = try #require(log(s)?.recent)
+        #expect(recent.count == 1)
+        #expect(recent.first?.access == .signal(target: target))
+        #expect(recent.first?.denied == true)
+        #expect(pending(s).isEmpty)
+        #expect(try JSONDecoder().decode(ActivityLog.self, from: JSONEncoder().encode(try #require(log(s)))) == log(s))
+    }
+
     @Test func distinctNetworkTargetsSurviveResponseRoundTrip() throws {
         let s = try service()
         for target in ["remote:*:7897", "remote:[2001:db8::7]:8443", "/private/var/run/mDNSResponder"] {

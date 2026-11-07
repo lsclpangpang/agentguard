@@ -62,3 +62,8 @@ scripts/build-app.sh            # 在 macOS 上构建 build/AgentGuard.zip（ad-
    第一次点“安装 Helper”时 macOS 会拒绝启动尚未允许的后台项目，这是正常流程；允许后 App 会自动连上。
 3. 在“隐私与安全性 > 完全磁盘访问”中添加 `/Library/PrivilegedHelperTools/com.lsclpangpang.agentguard.collector`（选择窗口里按 ⌘⇧G 输入路径），然后运行 `sudo launchctl kickstart -k system/com.lsclpangpang.agentguard.collector`。eslogger 由这个独立采集器进程启动，系统按它判断授权；它装在 App 包外，App 重新签名不会让授权失效。不授权只能看到沙箱拒绝记录，看不到进程生命周期。
 4. 点工具栏的 +“添加程序”：选择程序、选择项目文件夹、查看权限摘要，保存后启动。命令行工具会给出可以直接复制运行的完整命令；被阻止的访问在“最近活动”中处理。
+
+遇到任务已完成却一直等待退出时，检查“任务结束与取消”中的“管理本次运行的进程”。
+这项权限只控制同一次受保护运行中的进程，启用需要系统认证，保存后重启目标程序生效。
+维护时也可用已安装 App 的专用命令 `/Applications/AgentGuard.app/Contents/MacOS/AgentGuard --repair-process-control <配置档> --restart`；
+它会先更新后台服务，再读取最新配置并为这一项权限发起独立认证，认证通过后重启目标程序。重启会结束该程序当前运行的会话。

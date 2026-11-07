@@ -14,6 +14,7 @@ public struct SandboxDenial: Equatable, Sendable {
 
     /// The access this denial corresponds to, when it maps onto something a profile can grant.
     public var access: ObservedAccess? {
+        if operation == "signal" { return .signal(target: target ?? "") }
         guard let target else { return nil }
         if operation.hasPrefix("file-read") { return target.hasPrefix("/") ? .read(target) : nil }
         if operation.hasPrefix("file-write") { return target.hasPrefix("/") ? .write(target) : nil }

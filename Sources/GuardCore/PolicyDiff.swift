@@ -219,8 +219,10 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .systemDNSChanged(_, to):
             return "~ \(SystemDNS.title)：\(to.map(toggle) ?? "沿用已有规则")；仅连接 \(SystemDNS.socketPath)"
         case let .unrestrictedExecChanged(to): return (to ? "+" : "-") + " 允许执行任意程序"
-        case let .extraRuleAdded(rule): return "+ 原样规则 \(rule)"
-        case let .extraRuleRemoved(rule): return "- 原样规则 \(rule)"
+        case let .extraRuleAdded(rule):
+            return ProcessControl.matches(rule) ? "+ \(ProcessControl.title)：\(ProcessControl.detail)" : "+ 原样规则 \(rule)"
+        case let .extraRuleRemoved(rule):
+            return ProcessControl.matches(rule) ? "- \(ProcessControl.title)（撤回此项显式授权）" : "- 原样规则 \(rule)"
         case let .launchChanged(to):
             guard let to else { return "- 启动程序" }
             return "~ 启动程序：" + LaunchArguments.format([to.executable] + to.arguments)

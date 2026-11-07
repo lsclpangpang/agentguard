@@ -44,6 +44,7 @@ struct ProfileDetailView: View {
                         FilesCard(profile: profile)
                         TemplatesCard(profile: profile)
                         ProgramsAndNetworkCard(profile: profile)
+                        ProcessControlCard(profile: profile)
                         RecordMoreCard(profile: profile)
                     case .activity:
                         ActivityTab(profileID: profileID)
@@ -59,6 +60,31 @@ struct ProfileDetailView: View {
             .overlay(alignment: .top) { ScrollTopFade() }
             .background(Color(nsColor: .windowBackgroundColor))
             .navigationTitle(profileID)
+        }
+    }
+}
+
+private struct ProcessControlCard: View {
+    @EnvironmentObject var model: AppModel
+    let profile: Profile
+
+    var body: some View {
+        Card(title: "任务结束与取消", systemImage: "stop.circle") {
+            SwiftUI.Toggle(isOn: Binding(
+                get: { ProcessControl.isEnabled(in: profile) },
+                set: { model.setProcessControl($0, in: profile.id) }
+            )) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(ProcessControl.title)
+                    Text(ProcessControl.detail)
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("修改后需要重启程序才能更新正在运行的权限。关闭只撤回此项显式授权，其他迁移规则仍保留。")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(profile.mode == .unprotectedObserve || !model.helperReachable)
+            .accessibilityIdentifier("process-control-\(profile.id)")
         }
     }
 }

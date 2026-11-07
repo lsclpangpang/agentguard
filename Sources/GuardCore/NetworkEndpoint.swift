@@ -126,6 +126,8 @@ extension Observation {
         case .listen: return "监听 \(networkEndpoint?.address ?? "地址未记录")"
         case let .unixSocket(path, operation):
             return "\(operation == "network-bind" ? "监听本机套接字" : "连接本机套接字") \(path)"
+        case let .signal(target):
+            return target.isEmpty ? "发送进程控制信号（系统未提供目标）" : "发送进程控制信号 \(target)"
         }
     }
 }

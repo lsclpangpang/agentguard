@@ -56,7 +56,7 @@ public enum HelperRequest: Codable, Equatable, Sendable {
 
 /// Bumped whenever the App and the Helper must be updated together; the App compares it with its own.
 public enum HelperProtocol {
-    public static let version = 7
+    public static let version = 8
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {

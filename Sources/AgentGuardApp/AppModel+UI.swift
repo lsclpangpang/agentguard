@@ -171,6 +171,15 @@ extension AppModel {
             profile.network.listen = .allowed
         case .systemDNS:
             profile.network.systemDNS = .allowed
+        case .processControl:
+            ProcessControl.enable(in: &profile)
+        }
+    }
+
+    func setProcessControl(_ allowed: Bool, in id: String) {
+        edit(id, warnings: allowed ? [] : ["只撤回这一项显式授权；其他迁移规则和系统基础规则仍保留。"]) { profile in
+            if allowed { ProcessControl.enable(in: &profile) }
+            else { ProcessControl.disable(in: &profile) }
         }
     }
 

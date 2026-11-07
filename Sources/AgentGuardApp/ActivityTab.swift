@@ -198,6 +198,10 @@ private struct RecentAccessRow: View {
         if case .unixSocket = observation.access { return true }
         return false
     }
+    private var isSignal: Bool {
+        if case .signal = observation.access { return true }
+        return false
+    }
     private var port: String { observation.networkPort.map(String.init) ?? (isSocket ? "不适用（本机套接字）" : "系统未提供") }
     private var process: String {
         let name = observation.processName ?? "名称未记录"
@@ -231,9 +235,14 @@ private struct RecentAccessRow: View {
                     .foregroundStyle(observation.denied ? Color.red : Color.secondary).frame(width: 32, alignment: .leading)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(observation.summary).font(.system(.caption, design: .monospaced))
-                        .lineLimit(observation.isNetwork ? nil : 1).truncationMode(.middle)
-                        .fixedSize(horizontal: false, vertical: observation.isNetwork)
+                        .lineLimit(observation.isNetwork || isSignal ? nil : 1).truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: observation.isNetwork || isSignal)
                         .textSelection(.enabled)
+                    if isSignal {
+                        Text("任务结束或取消时的进程控制；拒绝可能使任务停在等待退出状态。")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text(process).font(.caption).foregroundStyle(.secondary)
+                    }
                     if observation.isNetwork {
                         Text(observation.isSystemDNS ? "\(SystemDNS.title) · 本机服务"
                              : isSocket ? "本机进程间通信 · 不使用网络端口"
@@ -340,6 +349,7 @@ private struct PendingRow<Actions: View>: View {
     private var sampleHeading: String {
         switch item.suggestion {
         case .outboundTCP, .loopbackPort, .listen: return "观测到的连接目标（不代表授权仅限这些目标）："
+        case .processControl: return "被拒绝的进程控制目标（系统原文）："
         default: return "涉及的位置："
         }
     }
@@ -353,6 +363,8 @@ private struct PendingRow<Actions: View>: View {
                 + template.exec.map { "运行 \($0.path)" } + template.loopbackPorts.map { "连接本机端口 \($0)" }
         case .systemDNS:
             return ["仅连接本机服务 \(SystemDNS.socketPath)", SystemDNS.detail]
+        case .processControl:
+            return [ProcessControl.detail]
         default:
             return [item.suggestion.title]
         }

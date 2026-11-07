@@ -8,6 +8,7 @@ public enum ObservedAccess: Hashable, Sendable, Codable {
     case connectRemote
     case listen(Int)
     case unixSocket(path: String, operation: String)
+    case signal(target: String)
 }
 
 public struct Observation: Hashable, Sendable, Codable {
@@ -44,6 +45,7 @@ public enum Suggestion: Hashable, Sendable, Codable {
     case outboundTCP
     case listen
     case systemDNS
+    case processControl
 }
 
 public struct PendingItem: Hashable, Sendable, Codable {
@@ -161,7 +163,7 @@ public struct SuggestionEngine: Sendable {
         var files: [String: (path: CanonicalPath, write: Bool, tally: Tally)] = [:]
         var execs: [String: Tally] = [:]
         var ports: [Int: Tally] = [:]
-        var outbound = Tally(), listen = Tally(), systemDNS = Tally()
+        var outbound = Tally(), listen = Tally(), systemDNS = Tally(), processControl = Tally()
 
         for observation in observations {
             switch observation.access {
@@ -210,6 +212,11 @@ public struct SuggestionEngine: Sendable {
                 if SystemDNS.matches(path: path, operation: operation), policy.network.systemDNS != .allowed {
                     systemDNS.add(observation, sample: SystemDNS.socketPath)
                 }
+            case let .signal(target):
+                if observation.denied, ProcessControl.covers(denialTarget: target),
+                   !ProcessControl.isEnabled(in: policy.extraRules) {
+                    processControl.add(observation, sample: target)
+                }
             }
         }
 
@@ -225,6 +232,7 @@ public struct SuggestionEngine: Sendable {
         if outbound.count > 0 { items.append(outbound.item(.outboundTCP, sensitive: false)) }
         if listen.count > 0 { items.append(listen.item(.listen, sensitive: false)) }
         if systemDNS.count > 0 { items.append(systemDNS.item(.systemDNS, sensitive: false)) }
+        if processControl.count > 0 { items.append(processControl.item(.processControl, sensitive: false)) }
         return items.sorted(by: Self.order)
     }
 
@@ -289,6 +297,7 @@ public struct SuggestionEngine: Sendable {
         case .outboundTCP: return (4, "")
         case .listen: return (5, "")
         case .systemDNS: return (6, "")
+        case .processControl: return (7, "")
         }
     }
 }

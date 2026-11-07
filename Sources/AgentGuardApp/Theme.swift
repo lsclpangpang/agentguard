@@ -93,6 +93,7 @@ extension Suggestion {
         case .outboundTCP: return "globe"
         case .listen: return "antenna.radiowaves.left.and.right"
         case .systemDNS: return "network"
+        case .processControl: return "stop.circle"
         }
     }
 
@@ -105,6 +106,7 @@ extension Suggestion {
         case .outboundTCP: return "对外 TCP 连接"
         case .listen: return "监听端口"
         case .systemDNS: return SystemDNS.title
+        case .processControl: return ProcessControl.title
         }
     }
 }

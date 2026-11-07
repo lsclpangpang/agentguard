@@ -26,6 +26,8 @@ public struct LegacyPermissionSummary: Equatable, Sendable {
                 description = ("创建子进程", "允许程序创建子进程；子进程继承已有的访问限制。")
             case [.atom("allow"), .atom("signal"), .list([.atom("target"), .atom("self")])]:
                 description = ("向自身发送信号", "允许程序向自身发送控制信号。")
+            case [.atom("allow"), .atom("signal"), .list([.atom("target"), .atom("same-sandbox")])]:
+                description = (ProcessControl.title, ProcessControl.detail)
             case [.atom("allow"), .atom("sysctl-read")]:
                 description = ("查询系统信息", "允许查询系统提供的内核和运行环境信息。")
             case [.atom("allow"), .atom("ipc-posix-shm-read-data"),

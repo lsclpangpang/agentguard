@@ -76,6 +76,16 @@ import Testing
         #expect(!item.sensitive && item.evidence == 1)
     }
 
+    @Test func appProcessControlPermission() {
+        var profile = Profile(id: "work", revision: 1, mode: .enforce, templates: [], files: [], exec: [], network: NetworkPolicy())
+        ProcessControl.enable(in: &profile)
+        #expect(ProcessControl.isEnabled(in: profile))
+        #expect(!ProcessControl.title.isEmpty && !ProcessControl.detail.isEmpty && !ProcessControl.rule.isEmpty)
+        #expect(Suggestion.processControl.summary == ProcessControl.title)
+        ProcessControl.disable(in: &profile)
+        #expect(!ProcessControl.isEnabled(in: profile))
+    }
+
     @Test func importAndCLI() throws {
         let allowlist = Data(#"{"read_write_roots":["/Users/me/easyops"],"read_only_roots":[]}"#.utf8)
         var result = try LegacyImporter.importInstallation(profileID: "knodo", allowlistJSON: allowlist, policySBPL: "(version 1)")

@@ -521,6 +521,8 @@ final class AppModel: ObservableObject {
                 profile.network.listen = .allowed
             case .systemDNS:
                 profile.network.systemDNS = .allowed
+            case .processControl:
+                ProcessControl.enable(in: &profile)
             }
         }
     }
