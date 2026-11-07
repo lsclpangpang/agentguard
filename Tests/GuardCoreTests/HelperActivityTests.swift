@@ -45,6 +45,34 @@ import Testing
         #expect(blocked?.lastSeen == Date(timeIntervalSince1970: 1_800_000_000))
     }
 
+    @Test func networkDestinationSurvivesActivityResponseAndPendingSamples() throws {
+        let s = try service()
+        s.observe(denial: try #require(SandboxLogParser.parse("Sandbox: agent(20) deny(1) network-outbound 203.0.113.10:443")))
+        let activityLog = try #require(log(s))
+        let data = try JSONEncoder().encode(activityLog)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let recent = try #require(object["recent"] as? [[String: Any]])
+        #expect(recent.first?["networkTarget"] as? String == "203.0.113.10:443")
+        #expect(recent.first?["processName"] as? String == "agent")
+        #expect(recent.first?["pid"] as? Int == 20)
+        #expect(pending(s).first { $0.suggestion == .outboundTCP }?.samples == ["203.0.113.10:443"])
+    }
+
+    @Test func distinctNetworkTargetsSurviveResponseRoundTrip() throws {
+        let s = try service()
+        for target in ["remote:*:7897", "remote:[2001:db8::7]:8443", "/private/var/run/mDNSResponder"] {
+            s.observe(denial: try #require(SandboxLogParser.parse("Sandbox: agent(20) deny(1) network-outbound \(target)")))
+        }
+        // An unrelated process must not have its destinations attached to this profile.
+        s.observe(denial: try #require(SandboxLogParser.parse("Sandbox: other(999) deny(1) network-outbound 203.0.113.20:443")))
+        let original = try #require(log(s))
+        let decoded = try JSONDecoder().decode(ActivityLog.self, from: JSONEncoder().encode(original))
+        #expect(decoded == original)
+        #expect(decoded.recent.map(\.networkTarget) == ["/private/var/run/mDNSResponder", "remote:[2001:db8::7]:8443", "remote:*:7897"])
+        #expect(decoded.recent.map(\.networkPort) == [nil, 8443, 7897])
+        #expect(pending(s).first { $0.suggestion == .outboundTCP }?.samples == ["remote:*:7897", "remote:[2001:db8::7]:8443"])
+    }
+
     @Test func keepBlockedArchivesOnlyRefusedItems() throws {
         let s = try service()
         s.observe(denial: try #require(SandboxLogParser.parse("Sandbox: agent(20) deny(1) file-read-data /Users/me/secret.txt")))

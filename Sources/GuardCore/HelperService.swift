@@ -56,7 +56,7 @@ public enum HelperRequest: Codable, Equatable, Sendable {
 
 /// Bumped whenever the App and the Helper must be updated together; the App compares it with its own.
 public enum HelperProtocol {
-    public static let version = 5
+    public static let version = 6
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -491,7 +491,8 @@ public final class HelperService {
     /// One sandbox denial from the unified log; only denials of managed processes are kept.
     public func observe(denial: SandboxDenial) {
         guard let access = denial.access, let instance = tracker.owner(ofPID: denial.pid) else { return }
-        record(Observation(instance: instance, access: access, denied: true, at: clock()), instance: instance)
+        record(Observation(instance: instance, access: access, denied: true, at: clock(),
+                           networkTarget: denial.networkEndpoint?.rawValue, processName: denial.process, pid: denial.pid), instance: instance)
     }
 
     private func record(_ observation: Observation, instance: Int) {

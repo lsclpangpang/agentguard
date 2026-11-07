@@ -6,6 +6,12 @@ public struct SandboxDenial: Equatable, Sendable {
     public var operation: String
     public var target: String?
 
+    public var networkEndpoint: NetworkEndpoint? {
+        guard operation == "network-outbound" || operation == "network-bind",
+              let target else { return nil }
+        return NetworkEndpoint(target)
+    }
+
     /// The access this denial corresponds to, when it maps onto something a profile can grant.
     public var access: ObservedAccess? {
         guard let target else { return nil }
@@ -13,11 +19,11 @@ public struct SandboxDenial: Equatable, Sendable {
         if operation.hasPrefix("file-write") { return target.hasPrefix("/") ? .write(target) : nil }
         if operation.hasPrefix("process-exec") { return target.hasPrefix("/") ? .exec(target) : nil }
         if operation == "network-outbound" || operation == "network-bind" {
-            guard let colon = target.lastIndex(of: ":"), let port = Int(target[target.index(after: colon)...]) else { return nil }
+            guard let endpoint = networkEndpoint else { return nil }
+            if let path = endpoint.socketPath { return .unixSocket(path: path, operation: operation) }
+            guard let port = endpoint.port else { return nil }
             if operation == "network-bind" { return .listen(port) }
-            let host = target[..<colon].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-            let loopback = host == "localhost" || host == "::1" || host.hasPrefix("127.")
-            return loopback ? .connectLoopback(port) : .connectRemote
+            return endpoint.isLoopback ? .connectLoopback(port) : .connectRemote
         }
         return nil
     }

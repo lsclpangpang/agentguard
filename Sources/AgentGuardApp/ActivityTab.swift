@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import GuardCore
 import SwiftUI
 
@@ -8,6 +9,7 @@ struct ActivityTab: View {
     let profileID: String
     @State private var selected: Set<Suggestion> = []
     @State private var showRecent = false
+    @State private var expandedAccess: Observation?
 
     private var items: [PendingItem] { model.pending[profileID] ?? [] }
     private var log: ActivityLog? { model.activity[profileID] }
@@ -158,14 +160,16 @@ struct ActivityTab: View {
             Card(title: "最近的访问记录", systemImage: "list.bullet.rectangle") {
                 DisclosureGroup(isExpanded: $showRecent) {
                     VStack(alignment: .leading, spacing: 4) {
+                        if recent.contains(where: \.isNetwork) {
+                            Text("网络记录显示系统提供的目标和端口。系统未提供的域名、完整 URL 或协议会明确标注；端口号不能单独证明访问了哪个网站。")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true).padding(.bottom, 6)
+                        }
                         ForEach(Array(recent.prefix(200).enumerated()), id: \.offset) { _, observation in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(observation.denied ? "阻止" : "允许").font(.caption.weight(.medium))
-                                    .foregroundStyle(observation.denied ? Color.red : Color.secondary).frame(width: 32, alignment: .leading)
-                                Text(observation.access.summary).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                                Spacer()
-                                if let at = observation.at { Text(at.formatted(date: .omitted, time: .standard)).font(.caption).foregroundStyle(.secondary) }
-                            }
+                            RecentAccessRow(observation: observation, expanded: Binding(
+                                get: { expandedAccess == observation },
+                                set: { expandedAccess = $0 ? observation : nil }
+                            ))
                         }
                     }
                     .padding(.top, 6)
@@ -174,6 +178,88 @@ struct ActivityTab: View {
                 }
             }
         }
+    }
+}
+
+private struct RecentAccessRow: View {
+    let observation: Observation
+    @Binding var expanded: Bool
+
+    private var endpoint: NetworkEndpoint? { observation.networkEndpoint }
+    private var isSocket: Bool {
+        if case .unixSocket = observation.access { return true }
+        return false
+    }
+    private var port: String { observation.networkPort.map(String.init) ?? (isSocket ? "不适用（本机套接字）" : "系统未提供") }
+    private var process: String {
+        let name = observation.processName ?? "名称未记录"
+        return observation.pid.map { "\(name)（PID \($0)）" } ?? name
+    }
+    private var fields: [(String, String)] {
+        [
+            ("目标", endpoint?.host ?? endpoint?.socketPath ?? "系统未提供"),
+            ("端口", port),
+            ("协议", endpoint?.transport ?? "系统未提供，不能仅凭端口判断"),
+            ("域名", isSocket ? "不适用（本机套接字）" : endpoint?.hostname ?? "系统未提供"),
+            ("完整 URL", isSocket ? "不适用（本机套接字）" : endpoint?.url ?? "系统未提供；IP 和端口无法还原完整 URL"),
+            ("发起程序", process),
+            ("原始目标", observation.networkTarget ?? "旧记录未保存目标，无法补回"),
+        ]
+    }
+    private var copyText: String {
+        ([observation.denied ? "阻止" : "允许", observation.summary]
+         + fields.map { "\($0.0)：\($0.1)" }
+         + (observation.at.map { ["时间：\($0.formatted(date: .numeric, time: .standard))"] } ?? [])).joined(separator: "\n")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(observation.denied ? "阻止" : "允许").font(.caption.weight(.medium))
+                    .foregroundStyle(observation.denied ? Color.red : Color.secondary).frame(width: 32, alignment: .leading)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(observation.summary).font(.system(.caption, design: .monospaced))
+                        .lineLimit(observation.isNetwork ? nil : 1).truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: observation.isNetwork)
+                        .textSelection(.enabled)
+                    if observation.isNetwork {
+                        Text(isSocket ? "本机进程间通信 · 不使用网络端口"
+                             : "端口：\(port) · 协议：\(endpoint?.transport ?? "未记录") · URL：\(endpoint?.url == nil ? "系统未提供" : "见详情")")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if observation.processName != nil || observation.pid != nil {
+                            Text(process).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Spacer(minLength: 4)
+                if observation.isNetwork {
+                    Button(expanded ? "收起" : "详情") { expanded.toggle() }.buttonStyle(.borderless).controlSize(.small)
+                }
+                if let at = observation.at {
+                    Text(at.formatted(date: .omitted, time: .standard)).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if observation.isNetwork && expanded {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(fields.indices, id: \.self) { index in
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(fields[index].0).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
+                            Text(fields[index].1).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        }.font(.caption)
+                    }
+                    Button("复制连接详情") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(copyText, forType: .string)
+                    }.controlSize(.small).padding(.top, 3)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+                .padding(.leading, 40)
+            }
+        }
+        .padding(.vertical, observation.isNetwork ? 5 : 0)
     }
 }
 
@@ -205,7 +291,7 @@ private struct PendingRow<Actions: View>: View {
                     Text("允许后实际新增：").font(.caption.weight(.medium))
                     ForEach(scope, id: \.self) { Text("  " + $0).font(.system(.caption, design: .monospaced)) }
                     if !item.samples.isEmpty {
-                        Text("涉及的位置：").font(.caption.weight(.medium)).padding(.top, 2)
+                        Text(sampleHeading).font(.caption.weight(.medium)).padding(.top, 2)
                         ForEach(item.samples, id: \.self) { Text("  " + $0).font(.system(.caption, design: .monospaced)) }
                     }
                     Text("允许不会补做已经失败的操作；保存并重启程序后，请重新尝试原来的操作。").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
@@ -225,6 +311,13 @@ private struct PendingRow<Actions: View>: View {
         return text
     }
 
+    private var sampleHeading: String {
+        switch item.suggestion {
+        case .outboundTCP, .loopbackPort, .listen: return "观测到的连接目标（不代表授权仅限这些目标）："
+        default: return "涉及的位置："
+        }
+    }
+
     /// Everything accepting the item would grant, so a harmless-looking trigger cannot hide a broad group.
     private var scope: [String] {
         switch item.suggestion {
@@ -234,19 +327,6 @@ private struct PendingRow<Actions: View>: View {
                 + template.exec.map { "运行 \($0.path)" } + template.loopbackPorts.map { "连接本机端口 \($0)" }
         default:
             return [item.suggestion.title]
-        }
-    }
-}
-
-extension ObservedAccess {
-    var summary: String {
-        switch self {
-        case let .read(path): return "读取 \(path)"
-        case let .write(path): return "写入 \(path)"
-        case let .exec(path): return "运行 \(path)"
-        case let .connectLoopback(port): return "连接本机端口 \(port)"
-        case .connectRemote: return "对外连接"
-        case let .listen(port): return "监听端口 \(port)"
         }
     }
 }
