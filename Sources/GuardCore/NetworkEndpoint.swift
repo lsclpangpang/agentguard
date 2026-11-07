@@ -120,7 +120,9 @@ extension Observation {
         case let .write(path): return "写入 \(path)"
         case let .exec(path): return "运行 \(path)"
         case .connectLoopback: return "连接本机 \(networkEndpoint?.address ?? "目标地址未记录")"
-        case .connectRemote: return "对外连接 \(networkEndpoint?.url ?? networkEndpoint?.address ?? "目标地址未记录")"
+        case .connectRemote:
+            let direction = networkEndpoint?.host == nil ? "网络连接" : "对外连接"
+            return "\(direction) \(networkEndpoint?.url ?? networkEndpoint?.address ?? "目标地址未记录")"
         case .listen: return "监听 \(networkEndpoint?.address ?? "地址未记录")"
         case let .unixSocket(path, operation):
             return "\(operation == "network-bind" ? "监听本机套接字" : "连接本机套接字") \(path)"

@@ -199,7 +199,7 @@ private struct RecentAccessRow: View {
         [
             ("目标", endpoint?.host ?? endpoint?.socketPath ?? "系统未提供"),
             ("端口", port),
-            ("协议", endpoint?.transport ?? "系统未提供，不能仅凭端口判断"),
+            ("传输协议", endpoint?.transport ?? "系统未提供，不能仅凭端口判断"),
             ("域名", isSocket ? "不适用（本机套接字）" : endpoint?.hostname ?? "系统未提供"),
             ("完整 URL", isSocket ? "不适用（本机套接字）" : endpoint?.url ?? "系统未提供；IP 和端口无法还原完整 URL"),
             ("发起程序", process),
@@ -224,7 +224,7 @@ private struct RecentAccessRow: View {
                         .textSelection(.enabled)
                     if observation.isNetwork {
                         Text(isSocket ? "本机进程间通信 · 不使用网络端口"
-                             : "端口：\(port) · 协议：\(endpoint?.transport ?? "未记录") · URL：\(endpoint?.url == nil ? "系统未提供" : "见详情")")
+                             : "端口：\(port) · 传输协议：\(endpoint?.transport ?? "未记录") · URL：\(endpoint?.url == nil ? "系统未提供" : "见详情")")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         if observation.processName != nil || observation.pid != nil {
@@ -235,6 +235,7 @@ private struct RecentAccessRow: View {
                 Spacer(minLength: 4)
                 if observation.isNetwork {
                     Button(expanded ? "收起" : "详情") { expanded.toggle() }.buttonStyle(.borderless).controlSize(.small)
+                        .accessibilityLabel("\(expanded ? "收起" : "查看")连接详情：\(observation.summary)，\(process)，端口 \(port)")
                 }
                 if let at = observation.at {
                     Text(at.formatted(date: .omitted, time: .standard)).font(.caption).foregroundStyle(.secondary)
@@ -252,6 +253,7 @@ private struct RecentAccessRow: View {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(copyText, forType: .string)
                     }.controlSize(.small).padding(.top, 3)
+                        .accessibilityLabel("复制连接详情：\(observation.summary)，\(process)，端口 \(port)")
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)

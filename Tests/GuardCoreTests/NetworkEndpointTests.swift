@@ -73,9 +73,11 @@ import Testing
     @Test func oldObservationDecodesWithExplicitUnknownDestination() throws {
         let old = try JSONDecoder().decode(Observation.self, from: Data(#"{"instance":1,"access":{"connectRemote":{}},"denied":true,"count":1}"#.utf8))
         #expect(old.networkTarget == nil && old.pid == nil && old.processName == nil)
-        #expect(old.summary == "对外连接 目标地址未记录")
+        #expect(old.summary == "网络连接 目标地址未记录")
         let loopback = Observation(instance: 1, access: .connectLoopback(9910), denied: true)
         #expect(loopback.networkPort == 9910)
+        let wildcard = Observation(instance: 1, access: .connectRemote, denied: true, networkTarget: "remote:*:7897")
+        #expect(wildcard.summary == "网络连接 目标地址未提供")
     }
 
     @Test func transportAndSocketObservationsDoNotProposeUnrelatedPermissions() throws {
