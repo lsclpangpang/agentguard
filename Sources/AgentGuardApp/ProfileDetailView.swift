@@ -169,10 +169,14 @@ private struct TrustNotices: View {
     var body: some View {
         let legacy = model.legacyAnalysis(profile)
         let issues = status?.verificationIssues ?? []
-        if !issues.isEmpty || legacy.hasUnverifiedFileRules || !(status?.untrackedInstances.isEmpty ?? true) {
+        let pending = status?.verificationPending ?? []
+        if !issues.isEmpty || !pending.isEmpty || legacy.hasUnverifiedFileRules || !(status?.untrackedInstances.isEmpty ?? true) {
             VStack(alignment: .leading, spacing: 8) {
                 if !issues.isEmpty {
-                    Notice(kind: .error, text: "运行中的程序没有通过保护确认，权限页列出的不代表它实际受到的限制：\n" + issues.joined(separator: "\n"))
+                    Notice(kind: .error, text: "权限核验发现以下差异。访问也可能受到 macOS 或程序自身的其他限制：\n" + issues.joined(separator: "\n"))
+                }
+                if !pending.isEmpty {
+                    Notice(kind: .warning, text: "部分权限暂时无法核验，系统会自动重新检查：\n" + pending.joined(separator: "\n"))
                 }
                 if let untracked = status?.untrackedInstances, !untracked.isEmpty {
                     Notice(kind: .warning, text: "暂时无法确认所有运行副本的保护状态：副本 #\(untracked.map(String.init).joined(separator: "、#")) 在 Helper 重启或活动记录中断前启动的子程序可能没有被跟踪。重启程序后恢复完整跟踪。")

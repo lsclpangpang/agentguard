@@ -164,9 +164,9 @@ import Testing
     }
 
     @Test func unlistedProbeAvoidsWhatPatternsGrant() throws {
-        let policy = try F.compile(F.profile(files: [pattern("/Users/me/.*", .file)]))
+        let policy = try F.compile(F.profile(files: [pattern("/private/var/em*", .file)]))
         let probe = SandboxVerification.unlistedProbe(for: policy, environment: F.environment)
-        #expect(probe == "/Users/me/agentguard-unlisted/probe")
+        #expect(probe == "/private/var/root")
     }
 
     @Test func overlappingReadOnlyAndWritablePatternsAreRefused() {

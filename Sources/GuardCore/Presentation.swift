@@ -149,10 +149,13 @@ public struct ProgramStatusSummary: Equatable, Sendable {
             summary = ProgramStatusSummary(headline: "暂时无法确认旧副本是否已退出",
                                            impact: "活动记录中断，旧权限可能仍在被使用。", next: .checkAndRecover, level: .attention)
         case .awaitingVerification:
-            summary = ProgramStatusSummary(headline: "正在确认保护", impact: "\(programName) 已启动，正在核对它实际受到的限制。", next: nil, level: .attention)
+            summary = status.verificationPending.isEmpty
+                ? ProgramStatusSummary(headline: "正在确认保护", impact: "\(programName) 已启动，正在核对它实际受到的限制。", next: nil, level: .attention)
+                : ProgramStatusSummary(headline: "部分权限暂未确认", impact: "\(programName) 正在运行。部分路径或系统检查暂不可用，详情见下方；系统会自动重新检查。",
+                                       next: .checkAndRecover, level: .attention)
         case .verificationFailed:
-            summary = ProgramStatusSummary(headline: "保护未通过确认",
-                                           impact: "运行中的 \(programName) 没有按下面的权限受到限制，原因见下方。", next: .restart, level: .problem)
+            summary = ProgramStatusSummary(headline: "权限核验发现差异",
+                                           impact: "部分访问的检查结果与已保存的权限不一致，详情见下方。", next: .checkAndRecover, level: .problem)
         case .inconsistent:
             summary = ProgramStatusSummary(headline: "运行中的权限与保存的不一致", impact: "无法确认 \(programName) 当前受到的限制。",
                                            next: .restart, level: .problem)

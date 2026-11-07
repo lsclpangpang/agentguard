@@ -577,8 +577,15 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 let remaining = deadline.timeIntervalSinceNow
                 guard remaining > 0, let snapshot = await refreshReport(timeout: remaining) else { break }
-                if snapshot.profiles.first(where: { $0.profileID == id })?.revisionState == .applied(running: true) {
+                let current = snapshot.profiles.first(where: { $0.profileID == id })
+                if current?.revisionState == .applied(running: true) {
                     lastNotice = [lastNotice, restart ? "\(id) 已重启，当前修订已加载，已确认旧运行副本退出。可以重新尝试之前失败的操作。" : "\(id) 已启动，当前修订已加载。"]
+                        .compactMap { $0 }.joined(separator: "\n")
+                    break
+                }
+                if let current, !current.runningInstances.isEmpty,
+                   current.revisionState == .verificationFailed || !current.verificationPending.isEmpty {
+                    lastNotice = [lastNotice, "\(id) 已\(restart ? "重启" : "启动")，权限核验结果见下方。"]
                         .compactMap { $0 }.joined(separator: "\n")
                     break
                 }

@@ -108,4 +108,13 @@ import Testing
         #expect(s.level == .problem && s.next == .stopUnmanaged)
         #expect(s.headline == "运行中 · 当前权限已生效")
     }
+
+    @Test func missingPathsArePendingAndDoNotRecommendRestart() {
+        var report = status(.awaitingVerification)
+        report.verificationPending = ["路径暂不存在，尚未核验：/tmp/transient.lock"]
+        let s = ProgramStatusSummary.evaluate(report, freshness: .current, programName: "Knodo", hasLaunch: true)
+        #expect(s.headline == "部分权限暂未确认" && s.level == .attention)
+        #expect(s.next == .checkAndRecover)
+        #expect(s.impact.contains("自动重新检查"))
+    }
 }
