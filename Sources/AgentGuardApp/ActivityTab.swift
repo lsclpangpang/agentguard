@@ -195,6 +195,10 @@ private struct RecentAccessRow: View {
         let name = observation.processName ?? "名称未记录"
         return observation.pid.map { "\(name)（PID \($0)）" } ?? name
     }
+    private var eventTime: String { observation.at?.formatted(date: .omitted, time: .standard) ?? "时间未记录" }
+    private var eventIdentifier: String {
+        "\(observation.at?.timeIntervalSince1970 ?? 0)-\(observation.pid ?? 0)-\(observation.hashValue)"
+    }
     private var fields: [(String, String)] {
         [
             ("目标", endpoint?.host ?? endpoint?.socketPath ?? "系统未提供"),
@@ -235,7 +239,8 @@ private struct RecentAccessRow: View {
                 Spacer(minLength: 4)
                 if observation.isNetwork {
                     Button(expanded ? "收起" : "详情") { expanded.toggle() }.buttonStyle(.borderless).controlSize(.small)
-                        .accessibilityLabel("\(expanded ? "收起" : "查看")连接详情：\(observation.summary)，\(process)，端口 \(port)")
+                        .accessibilityLabel("\(expanded ? "收起" : "查看")连接详情：\(eventTime)，\(observation.summary)，\(process)，端口 \(port)")
+                        .accessibilityIdentifier("network-details-\(eventIdentifier)")
                 }
                 if let at = observation.at {
                     Text(at.formatted(date: .omitted, time: .standard)).font(.caption).foregroundStyle(.secondary)
@@ -253,7 +258,8 @@ private struct RecentAccessRow: View {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(copyText, forType: .string)
                     }.controlSize(.small).padding(.top, 3)
-                        .accessibilityLabel("复制连接详情：\(observation.summary)，\(process)，端口 \(port)")
+                        .accessibilityLabel("复制连接详情：\(eventTime)，\(observation.summary)，\(process)，端口 \(port)")
+                        .accessibilityIdentifier("network-copy-\(eventIdentifier)")
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
