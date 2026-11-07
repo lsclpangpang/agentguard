@@ -60,6 +60,7 @@ public struct SystemSandboxProbe: SandboxProbe {
         switch result {
         case 0: return .allowed
         case 1: return .denied
+        case -2: return .missing
         default: return .unavailable
         }
     }

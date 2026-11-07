@@ -9,6 +9,7 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
     var writable: [String] = []
     var machAllowed: Set<String> = []
     var unavailable = false
+    var missing: Set<String> = []
     private(set) var probedPIDs: [Int32] = []
 
     func isSandboxed(pid: Int32) -> Bool? {
@@ -18,6 +19,7 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
 
     func check(pid: Int32, operation: SandboxOperation, target: String) -> SandboxCheckResult {
         if unavailable { return .unavailable }
+        if missing.contains(target) { return .missing }
         func under(_ roots: [String]) -> Bool { roots.contains { target == $0 || target.hasPrefix($0 + "/") } }
         switch operation {
         case .machLookup: return machAllowed.contains(target) ? .allowed : .denied
@@ -53,13 +55,13 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
     @Test func openDefaultAndHelperAccessFail() throws {
         let policy = try F.compile(F.profile())
         let probe = FakeProbe()
-        probe.readable = ["/Users/me"]
+        probe.readable = ["/private/var/empty"]
         probe.machAllowed = [F.environment.helperServiceName]
         guard case let .failed(issues) = SandboxVerification.verify(pid: 7, expectations: SandboxVerification.expectations(for: policy, environment: F.environment), probe: probe) else {
             Issue.record("expected failure"); return
         }
         #expect(issues.contains("受管进程可以连接 AgentGuard Helper"))
-        #expect(issues.contains { $0.hasPrefix("未授权的位置 /Users/me/.agentguard-unlisted-probe 可以读取") })
+        #expect(issues.contains { $0.hasPrefix("未授权的位置 /private/var/empty 可以读取") })
     }
 
     @Test func unprotectedObservationOnlyChecksBuiltInDenials() throws {
@@ -76,7 +78,38 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
         #expect(SandboxVerification.verify(pid: 7, expectations: SandboxVerification.expectations(for: policy, environment: F.environment), probe: probe) == .notSandboxed)
         probe.sandboxed = true
         probe.unavailable = true
-        #expect(SandboxVerification.verify(pid: 7, expectations: SandboxVerification.expectations(for: policy, environment: F.environment), probe: probe) == .unavailable)
+        guard case .inconclusive = SandboxVerification.verify(pid: 7, expectations: SandboxVerification.expectations(for: policy, environment: F.environment), probe: probe)
+        else { Issue.record("unavailable checks must not pass or fail"); return }
+    }
+
+    @Test func directoryAndProtectedChecksUseTheRealObjects() throws {
+        let policy = try F.compile(F.profile(files: [F.rw("/Users/me/work")]))
+        let expectations = SandboxVerification.expectations(for: policy, environment: F.environment)
+        #expect(expectations.contains { $0.target == "/Users/me/work" && $0.operation == .fileWrite && $0.allowed })
+        for path in F.environment.protectedPaths + F.environment.writeProtectedPaths {
+            #expect(expectations.contains { $0.target == path && $0.operation == .fileWrite && !$0.allowed })
+        }
+        #expect(!expectations.contains { $0.target.hasSuffix("/.agentguard-probe") })
+    }
+
+    @Test func missingPathsProveNeitherAccessNorDenial() {
+        let probe = FakeProbe()
+        probe.missing = ["/missing"]
+        for allowed in [true, false] {
+            let expected = [SandboxExpectation(operation: .fileRead, target: "/missing", allowed: allowed, failure: "mismatch"),
+                            SandboxExpectation(operation: .fileWrite, target: "/missing", allowed: allowed, failure: "mismatch")]
+            #expect(SandboxVerification.verify(pid: 7, expectations: expected, probe: probe)
+                    == .inconclusive(["路径暂不存在，尚未核验：/missing"]))
+        }
+    }
+
+    @Test func missingPathDoesNotConcealARealMismatch() {
+        let probe = FakeProbe()
+        probe.missing = ["/missing"]
+        probe.writable = ["/protected"]
+        let expected = [SandboxExpectation(operation: .fileRead, target: "/missing", allowed: true, failure: "missing"),
+                        SandboxExpectation(operation: .fileWrite, target: "/protected", allowed: false, failure: "protected writable")]
+        #expect(SandboxVerification.verify(pid: 7, expectations: expected, probe: probe) == .failed(["protected writable"]))
     }
 }
 
@@ -180,6 +213,39 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
         let profile = F.profile(files: [F.rw("/Users/me/work"), temporary], revision: 2)
         #expect(s.handle(.proposeChange(profile: profile), caller: F.appCaller, process: appProcess) == .failure(code: "temporary_grants_unavailable"))
         #expect(s.handle(.applyTightening(profile: profile), caller: F.appCaller, process: appProcess) == .failure(code: "temporary_grants_unavailable"))
+    }
+
+    @Test func failedVerificationRecoversAndConfirmedAccessIsRechecked() throws {
+        let probe = FakeProbe()
+        let clock = Clock()
+        let s = try service(probe: probe, clock: clock)
+        _ = s.handle(.registerInstance(profileID: "knodo", revision: 1), caller: F.cliCaller, process: ProcessKey(pid: 20, version: 1))
+        #expect(status(s)?.revisionState == .verificationFailed)
+        probe.writable = ["/Users/me/work"]
+        clock.now = clock.now.addingTimeInterval(HelperService.verificationRetryInterval)
+        #expect(status(s)?.revisionState == .applied(running: true))
+        #expect(status(s)?.verificationIssues.isEmpty == true)
+        probe.missing = ["/Users/me/work"]
+        clock.now = clock.now.addingTimeInterval(HelperService.verificationRetryInterval)
+        #expect(status(s)?.revisionState == .awaitingVerification)
+        #expect(status(s)?.verificationIssues.isEmpty == true)
+        #expect(status(s)?.verificationPending == ["路径暂不存在，尚未核验：/Users/me/work"])
+        probe.missing = []
+        clock.now = clock.now.addingTimeInterval(HelperService.verificationRetryInterval)
+        #expect(status(s)?.revisionState == .applied(running: true))
+        #expect(status(s)?.verificationPending.isEmpty == true)
+        probe.writable = []
+        clock.now = clock.now.addingTimeInterval(HelperService.verificationRetryInterval)
+        #expect(status(s)?.revisionState == .verificationFailed)
+    }
+
+    @Test func oldReportsWithoutPendingChecksStillDecode() throws {
+        let report = ProfileStatusReport(profileID: "knodo", savedRevision: 1, mode: .enforce, revisionState: .awaitingVerification,
+                                         runningInstances: [1], pendingCount: 0)
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any])
+        object.removeValue(forKey: "verificationPending")
+        let decoded = try JSONDecoder().decode(ProfileStatusReport.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.verificationPending.isEmpty)
     }
 }
 

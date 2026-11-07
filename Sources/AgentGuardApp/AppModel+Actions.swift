@@ -172,6 +172,7 @@ extension AppModel {
             lines.append("  运行副本：\(status.runningInstances)  跟踪不完整：\(status.untrackedInstances)  未受管：\(status.unmanagedProcesses)")
             if let agent = status.launchAgent { lines.append("  启动：\(agent.displayText)\(agent.problem.map { "（\($0)）" } ?? "")") }
             lines += status.verificationIssues.map { "  核对问题：\($0)" }
+            lines += status.verificationPending.map { "  暂未核验：\($0)" }
             if let profile = profile(status.profileID) {
                 lines.append("  旧规则：\(profile.extraRules.count) 条")
                 if let launch = profile.launch {

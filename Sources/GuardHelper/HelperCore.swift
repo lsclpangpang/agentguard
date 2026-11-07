@@ -342,7 +342,15 @@ final class HelperCore {
         default:
             break
         }
-        if let stop = operationStop { return .report(OperationReport(stop: stop, warnings: operationWarnings)) }
+        if let stop = operationStop {
+            switch request {
+            case .installLaunchAgent, .restartManagedInstance:
+                // Starting a program with no old process is not a "nothing to stop" action.
+                return .report(OperationReport(stop: stop == StopOutcome() ? nil : stop, warnings: operationWarnings))
+            default:
+                return .report(OperationReport(stop: stop, warnings: operationWarnings))
+            }
+        }
         return operationWarnings.isEmpty ? response : .completed(warnings: operationWarnings)
     }
 
