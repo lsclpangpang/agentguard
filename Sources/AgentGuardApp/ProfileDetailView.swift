@@ -864,11 +864,15 @@ private struct ProgramsAndNetworkCard: View {
                     }
                 }
                 .toggleStyle(.switch)
+                .accessibilityLabel(SystemDNS.title)
+                .accessibilityHint("仅控制 \(SystemDNS.socketPath) 的连接，修改后需重启程序生效")
                 .accessibilityIdentifier("system-dns-toggle")
                 if profile.network.systemDNS == nil {
                     HStack {
                         Text("尚未单独设置；当前是否能连接，以运行记录为准。").font(.caption).foregroundStyle(.secondary)
                         Button("明确阻止") { model.setSystemDNS(false, in: profile.id) }.controlSize(.small)
+                            .accessibilityLabel("明确阻止系统域名解析与服务发现")
+                            .accessibilityIdentifier("system-dns-deny-button")
                     }
                 }
                 Text(profile.mode == .unprotectedObserve ? "当前处于无保护观察模式，不执行这项限制。"
