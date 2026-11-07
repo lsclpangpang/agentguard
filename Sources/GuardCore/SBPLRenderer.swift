@@ -27,6 +27,12 @@ public struct SBPLRenderer: Sendable {
             lines += policy.exec.map { "(allow process-exec (literal \(quote($0.path))))" }
             lines += networkRules(policy.network)
             lines += policy.extraRules
+            // The explicit choice wins over imported/baseline rules, including broad Unix-socket
+            // allows. Nil leaves old profiles unchanged; it is not a verified denial.
+            if let systemDNS = policy.network.systemDNS {
+                let action = systemDNS == .allowed ? "allow" : "deny"
+                lines.append("(\(action) network-outbound (literal \(quote(SystemDNS.socketPath))))")
+            }
         }
         lines += builtinDenials()
         return lines.joined(separator: "\n") + "\n"

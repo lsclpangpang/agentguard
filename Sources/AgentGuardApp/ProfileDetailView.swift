@@ -83,22 +83,14 @@ private struct ProfileHeader: View {
                     }
                 }
                 if let command = model.command(for: profile) {
-                    HStack(spacing: 8) {
-                        Text(command).font(.system(.callout, design: .monospaced))
-                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
-                        Button {
-                            Pasteboard.copy(command)
-                            copied = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-                        } label: {
-                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    if profile.launch != nil {
+                        DisclosureGroup("终端启动命令") {
+                            commandView(command).padding(.top, 4)
                         }
-                        .buttonStyle(.borderless)
-                        .help("复制命令：在终端中粘贴即可在这份权限下运行")
+                        .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        commandView(command)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
                 } else if profile.launch == nil {
                     Text("在“受管程序”中指定程序后，这里会给出可以直接复制运行的完整命令。")
                         .font(.callout).foregroundStyle(.secondary)
@@ -112,7 +104,26 @@ private struct ProfileHeader: View {
         ProgramStatusSummary.evaluate(status, freshness: model.freshness, programName: profile.id, hasLaunch: profile.launch != nil)
     }
 
-    private var tint: Color { Theme.color(summary.level) }
+    private var tint: Color { Theme.color(summary.headlineLevel) }
+
+    private func commandView(_ command: String) -> some View {
+        HStack(spacing: 8) {
+            Text(command).font(.system(.callout, design: .monospaced))
+                .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+            Button {
+                Pasteboard.copy(command)
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .help("复制命令：在终端中粘贴即可在这份权限下运行")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+    }
 }
 
 /// What is happening, what it means and what to do, with the one action that resolves it.
@@ -124,19 +135,48 @@ private struct StatusCard: View {
 
     var body: some View {
         let summary = ProgramStatusSummary.evaluate(status, freshness: model.freshness, programName: profile.id, hasLaunch: profile.launch != nil)
-        Card(title: summary.headline, systemImage: Theme.symbol(summary.level)) {
+        Card(title: summary.headline, systemImage: Theme.symbol(summary.headlineLevel),
+             iconTint: Theme.color(summary.headlineLevel)) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(summary.impact).font(.callout).fixedSize(horizontal: false, vertical: true)
-                if let confirmed = model.statusConfirmedAt {
-                    Text("最近确认：\(confirmed.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(.secondary)
-                }
-                HStack(spacing: 10) {
-                    if let next = summary.next { action(next) }
-                    if let pending = status?.pendingCount, pending > 0 {
-                        Button("查看 \(pending) 项需要处理的活动") { showTab(.activity) }
+                if summary.next != nil || (status?.pendingCount ?? 0) > 0 {
+                    HStack(spacing: 10) {
+                        if let next = summary.next { action(next) }
+                        if let pending = status?.pendingCount, pending > 0 {
+                            Button("查看 \(pending) 项需要处理的活动") { showTab(.activity) }
+                        }
                     }
+                    .disabled(!model.helperReachable || model.restartingProfiles.contains(profile.id))
                 }
-                .disabled(!model.helperReachable || model.restartingProfiles.contains(profile.id))
+                DisclosureGroup("运行详情") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(status?.runtimeInstances ?? [], id: \.id) { instance in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("运行副本 #\(instance.id) · 修订 \(instance.revision) · 已知 PID \(instance.knownPIDs.map(String.init).joined(separator: "、"))")
+                                if let pid = instance.checkedPID {
+                                    Text("最近核验的代表进程：PID \(String(pid))")
+                                }
+                            }
+                        }
+                        if let confirmed = model.statusConfirmedAt {
+                            Text("最近确认：\(confirmed.formatted(date: .omitted, time: .standard))")
+                        }
+                        if let deferred = status?.verificationDeferred, !deferred.isEmpty {
+                            Text("等待授权路径出现（无需处理）").fontWeight(.medium)
+                            Text("以下路径目前不存在，出现后会自动检查，无需手工创建。")
+                            ForEach(deferred, id: \.self) { Text($0) }
+                        }
+                        if summary.next == nil {
+                            Button("重新检查状态") { model.refresh() }
+                                .disabled(!model.helperReachable || model.restartingProfiles.contains(profile.id))
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .padding(.top, 6)
+                }
+                .font(.callout)
             }
         }
     }
@@ -169,19 +209,64 @@ private struct TrustNotices: View {
     var body: some View {
         let legacy = model.legacyAnalysis(profile)
         let issues = status?.verificationIssues ?? []
-        if !issues.isEmpty || legacy.hasUnverifiedFileRules || !(status?.untrackedInstances.isEmpty ?? true) {
+        let pending = status?.verificationPending ?? []
+        if !issues.isEmpty || !pending.isEmpty || legacy.hasUnverifiedFileRules || !(status?.untrackedInstances.isEmpty ?? true) {
             VStack(alignment: .leading, spacing: 8) {
                 if !issues.isEmpty {
-                    Notice(kind: .error, text: "运行中的程序没有通过保护确认，权限页列出的不代表它实际受到的限制：\n" + issues.joined(separator: "\n"))
+                    Notice(kind: .error, text: "权限核验发现以下差异。访问也可能受到 macOS 或程序自身的其他限制：\n" + issues.joined(separator: "\n"))
                 }
-                if let untracked = status?.untrackedInstances, !untracked.isEmpty {
-                    Notice(kind: .warning, text: "暂时无法确认所有运行副本的保护状态：副本 #\(untracked.map(String.init).joined(separator: "、#")) 在 Helper 重启或活动记录中断前启动的子程序可能没有被跟踪。重启程序后恢复完整跟踪。")
+                if !pending.isEmpty {
+                    Notice(kind: .warning, text: "部分权限暂时无法核验，系统会自动重新检查：\n" + pending.joined(separator: "\n"))
+                }
+                if let status, !status.untrackedInstances.isEmpty {
+                    TrackingGapNotice(status: status)
                 }
                 if legacy.hasUnverifiedFileRules {
                     Notice(kind: .warning, text: "存在 \(legacy.unverified.count) 条尚未核对的旧规则，它们可能放开权限页没有列出的访问。详见“高级”。")
                 }
             }
         }
+    }
+}
+
+/// Keep uncertainty visible once; the instance history is available on demand.
+private struct TrackingGapNotice: View {
+    let status: ProfileStatusReport
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                if !status.historicalTrackingGaps.isEmpty {
+                    Text("历史副本 #\(status.historicalTrackingGaps.map(String.init).joined(separator: "、#"))：已知进程已退出，但此前遗漏的子进程是否退出仍无法确认。")
+                }
+                if !status.activeTrackingGaps.isEmpty {
+                    Text("当前副本 #\(status.activeTrackingGaps.map(String.init).joined(separator: "、#"))：后台服务重启或活动记录中断前启动的子进程，可能没有被完整跟踪。")
+                }
+                Text("当前核验只针对已知副本，不能据此确认所有旧权限已收回。重新检查或重启程序无法补回遗漏的历史；下次正常重启 Mac 后会清理旧记录并重新建立跟踪。")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 8)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("部分子进程记录不完整").font(.callout.weight(.medium))
+                    Text("部分旧子进程是否退出仍待确认。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Button(expanded ? "收起" : "查看详情") { expanded.toggle() }
+                    .font(.caption).buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.orange.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.orange.opacity(0.25)))
     }
 }
 
@@ -193,17 +278,34 @@ private struct EffectivePermissionsCard: View {
 
     var body: some View {
         let overview = model.overview(profile)
-        Card(title: "实际权限", systemImage: "checklist",
+        let legacy = LegacyPermissionSummary(rules: overview.unverifiedLegacy)
+        Card(title: "已知权限与来源", systemImage: "checklist",
              subtitle: overview.complete ? "下面合并了你添加的授权、推荐权限组、程序启动所需和已核对的迁移规则。"
                                          : "部分旧规则或系统基础规则尚未逐项核对，下面列出已知授权。") {
             Button(expanded ? "收起" : "展开全部（\(overview.files.count)）") { expanded.toggle() }.buttonStyle(.borderless)
         } content: {
             VStack(alignment: .leading, spacing: 6) {
-                if !overview.unverifiedLegacy.isEmpty {
-                    Notice(kind: .warning, text: "以下旧规则无法核对，它们可能放开没有列出的访问：\n" + overview.unverifiedLegacy.joined(separator: "\n"))
+                if !legacy.items.isEmpty {
+                    DisclosureGroup("旧规则还提供 \(legacy.items.count) 项访问") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(legacy.items, id: \.rule) { item in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.title).font(.callout.weight(.medium))
+                                    Text(item.detail).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }.padding(.vertical, 6)
+                    }
+                }
+                if let notice = legacy.localNetworkNotice {
+                    Notice(kind: .warning, text: notice)
+                }
+                if !legacy.unknown.isEmpty {
+                    Notice(kind: .warning, text: "还有 \(legacy.unknown.count) 条旧规则的范围无法解析，可能放开下面没有列出的访问。原始规则见“高级”。")
                 }
                 if !overview.unverifiedBaseRules.isEmpty {
-                    Notice(kind: .warning, text: "系统基础规则还提供程序运行所需的访问，尚未逐项列入此表：\n" + overview.unverifiedBaseRules.joined(separator: "\n"))
+                    Text("系统基础规则另提供运行所需的文件和服务访问，尚未逐项展开；本表不是完整清单。原始规则见“高级”。")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
                 let shown = expanded ? overview.files : Array(overview.files.filter { !$0.redundant }.prefix(8))
                 ForEach(shown, id: \.self) { entry in
@@ -227,6 +329,10 @@ private struct EffectivePermissionsCard: View {
                 }
                 Divider().padding(.vertical, 4)
                 Text(networkLine(overview)).font(.callout)
+                if let systemDNS = overview.network.systemDNS {
+                    Text("\(SystemDNS.title)：\(systemDNS == .allowed ? "允许" : "阻止")（你设置的，仅连接 \(SystemDNS.socketPath)）")
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                }
                 Text(execLine(overview)).font(.callout).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -295,26 +401,32 @@ private struct AdvancedCard: View {
         Card(title: "诊断信息", systemImage: "stethoscope") {
             VStack(alignment: .leading, spacing: 6) {
                 row("已保存的修订", status.map { String($0.savedRevision) } ?? String(profile.revision))
-                row("运行状态", status?.revisionState.displayText ?? "未知")
+                row("全部副本确认", status?.revisionState.displayText ?? "未知")
+                row("当前已知副本", status.map {
+                    ProgramStatusSummary.evaluate($0, freshness: model.freshness, programName: profile.id, hasLaunch: profile.launch != nil).headline
+                } ?? "未知")
                 row("运行副本", (status?.runningInstances ?? []).map { "#\($0)" }.joined(separator: "、").ifEmpty("无"))
-                row("保护模式", profile.mode.displayName)
+                row("配置模式", profile.mode.configurationName)
+                Text("配置模式表示保存的设置；实际运行与核验结果见“概况”。").font(.caption).foregroundStyle(.secondary)
                 if let launch = profile.launch {
                     row("启动入口", launch.executable)
                     row("原启动项", launch.originalLabel ?? "无")
                 }
                 if !profile.extraRules.isEmpty {
                     Divider()
-                    Text("从旧安装迁移的规则（\(profile.extraRules.count) 条）").font(.subheadline.weight(.medium))
-                    ForEach(legacy.fileRules, id: \.rule) { rule in
-                        Text(rule.rule).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    DisclosureGroup("原始迁移规则（\(profile.extraRules.count) 条）") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(profile.extraRules.enumerated()), id: \.offset) { _, rule in
+                                Text(rule).font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(legacy.unverified.contains(rule) ? Color.orange : Color.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }.padding(.vertical, 6)
                     }
-                    ForEach(legacy.unverified, id: \.self) { rule in
-                        Label(rule, systemImage: "exclamationmark.triangle.fill").font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.orange).textSelection(.enabled)
-                    }
-                    ForEach(legacy.other, id: \.self) { rule in
-                        Text(rule).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
+                }
+                DisclosureGroup("原始系统基础规则") {
+                    Text(model.config.environment.baseRules.joined(separator: "\n"))
+                        .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 }
             }
         }
@@ -348,7 +460,7 @@ private struct FilesCard: View {
 
     var body: some View {
         Card(title: "你添加的文件访问", systemImage: "folder.fill",
-             subtitle: "程序只能访问这里和上方“实际权限”列出的位置。移除或改为仅查看时，会一并处理只在它之内的授权，并说明仍保留访问的其他来源。") {
+             subtitle: "这里管理你显式添加的授权。模板、旧规则和系统基础规则也可能提供访问，来源见上方。移除或改为仅查看时，会说明仍保留访问的其他来源。") {
             Menu {
                 Button("只读…") { model.addFolder(to: profile.id, access: .readOnly) }
                 Button("读写…") { model.addFolder(to: profile.id, access: .readWrite) }
@@ -431,7 +543,7 @@ private struct TemplatesCard: View {
 
     var body: some View {
         Card(title: "推荐权限组", systemImage: "square.stack.3d.up.fill",
-             subtitle: "常见工具运行所需的一组权限，整体开关。每组实际放开的位置见上方“实际权限”。") {
+             subtitle: "常见工具运行所需的一组权限，整体开关。每组放开的位置见上方“已知权限与来源”。") {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                 ForEach(model.templates, id: \.id) { template in
                     TemplateTile(template: template, enabled: profile.templates.contains { $0.id == template.id }) { enabled in
@@ -484,7 +596,7 @@ private struct ManagedProgramsCard: View {
 
     var body: some View {
         Card(title: "受管程序", systemImage: "app.badge.checkmark",
-             subtitle: "这些可执行文件会自动获得读取和运行权限。没有经过 AgentGuard 运行的副本不受限制，会在这里报告。") {
+             subtitle: "这里是配置的可执行文件，不是运行进程列表。它们会获得读取和运行权限；实际副本与 PID 见上方状态。没有经过 AgentGuard 运行的副本会在这里报告。") {
             Button { adding = true } label: { Label("添加", systemImage: "plus") }
                 .buttonStyle(.borderless)
         } content: {
@@ -688,8 +800,11 @@ private struct ProgramsAndNetworkCard: View {
              subtitle: "允许运行的其他程序、可连接的本机端口和网络范围。允许某个端口不代表授权该服务替它做的事。") {
             VStack(alignment: .leading, spacing: 14) {
                 let overview = model.overview(profile)
+                if let notice = LegacyPermissionSummary(rules: profile.extraRules).localNetworkNotice {
+                    Notice(kind: .warning, text: notice)
+                }
                 if !overview.unverifiedNetwork.isEmpty || !overview.unverifiedExec.isEmpty {
-                    Notice(kind: .warning, text: "下方列表和开关是显式设置。旧规则或系统基础规则可能继续授权，关闭开关或移除列表项不能保证完全收回。")
+                    Notice(kind: .warning, text: "TCP/UDP、监听和程序列表是显式设置。旧规则或系统基础规则可能继续提供相同访问，修改这些设置不一定能完全收回。")
                 }
                 if profile.unrestrictedExec {
                     Notice(kind: .warning, text: "允许运行任意程序（从现有安装迁移时保留）。")
@@ -736,6 +851,33 @@ private struct ProgramsAndNetworkCard: View {
                 }
 
                 Divider()
+
+                SwiftUI.Toggle(isOn: Binding(
+                    get: { profile.network.systemDNS == .allowed },
+                    set: { model.setSystemDNS($0, in: profile.id) })) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(SystemDNS.title)
+                        Text(SystemDNS.detail).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(SystemDNS.socketPath).font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                }
+                .toggleStyle(.switch)
+                .accessibilityLabel(SystemDNS.title)
+                .accessibilityHint("仅控制 \(SystemDNS.socketPath) 的连接，修改后需重启程序生效")
+                .accessibilityIdentifier("system-dns-toggle")
+                if profile.network.systemDNS == nil {
+                    HStack {
+                        Text("尚未单独设置；当前是否能连接，以运行记录为准。").font(.caption).foregroundStyle(.secondary)
+                        Button("明确阻止") { model.setSystemDNS(false, in: profile.id) }.controlSize(.small)
+                            .accessibilityLabel("明确阻止系统域名解析与服务发现")
+                            .accessibilityIdentifier("system-dns-deny-button")
+                    }
+                }
+                Text(profile.mode == .unprotectedObserve ? "当前处于无保护观察模式，不执行这项限制。"
+                     : "修改后需重启程序生效；关闭会明确阻止这个服务连接。")
+                    .font(.caption).foregroundStyle(.secondary)
 
                 networkToggle("允许对外 TCP 连接", detail: "Agent 连接模型服务通常需要打开", keyPath: \.outboundTCP)
                 networkToggle("允许接收连接（监听端口）", detail: "只有提供本地服务的程序需要", keyPath: \.listen)

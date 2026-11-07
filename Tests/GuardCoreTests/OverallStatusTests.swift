@@ -57,7 +57,7 @@ import Testing
     @Test func untrackedCopiesNeedAttention() {
         var o = object()
         o.untrackedInstances = 1
-        #expect(OverallStatus.evaluate(objects: [o], collector: healthy).reasons == ["knodo：暂时无法确认所有运行副本的保护状态"])
+        #expect(OverallStatus.evaluate(objects: [o], collector: healthy).reasons == ["knodo：子进程跟踪记录不完整"])
     }
 
     @Test func incompleteRevisionIsAttention() {

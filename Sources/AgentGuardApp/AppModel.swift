@@ -519,6 +519,8 @@ final class AppModel: ObservableObject {
                 profile.network.outboundTCP = .allowed
             case .listen:
                 profile.network.listen = .allowed
+            case .systemDNS:
+                profile.network.systemDNS = .allowed
             }
         }
     }
@@ -560,7 +562,10 @@ final class AppModel: ObservableObject {
             var lines = ["按已保存的权限启动：" + LaunchArguments.format([launch.executable] + launch.arguments),
                          runAtLogin(id) ?? launch.runAtLogin ? "启用登录自启，后续登录也通过 AgentGuard 启动" : "仅在本次登录中启动，不添加登录自启"]
             if !(status(for: id)?.runningInstances.isEmpty ?? true) {
-                lines.insert("结束 \(id) 当前运行的副本，正在进行的任务会被中断；重启后旧权限才会收回", at: 0)
+                lines.insert("结束 \(id) 当前已跟踪的进程，正在进行的任务会被中断；新副本将加载已保存的权限", at: 0)
+            }
+            if !(status(for: id)?.untrackedInstances.isEmpty ?? true) {
+                lines.append("历史子进程跟踪记录不完整；本次重启不能确认遗漏的旧子进程已经退出")
             }
             if let original = launch.originalLabel, status(for: id)?.launchAgent?.canRestoreOriginal != true {
                 lines.append("备份并替换原自启任务：\(original)")
@@ -577,8 +582,18 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 let remaining = deadline.timeIntervalSinceNow
                 guard remaining > 0, let snapshot = await refreshReport(timeout: remaining) else { break }
-                if snapshot.profiles.first(where: { $0.profileID == id })?.revisionState == .applied(running: true) {
-                    lastNotice = [lastNotice, restart ? "\(id) 已重启，当前修订已加载，已确认旧运行副本退出。可以重新尝试之前失败的操作。" : "\(id) 已启动，当前修订已加载。"]
+                let current = snapshot.profiles.first(where: { $0.profileID == id })
+                if let current, (current.runtimeRevisionState ?? current.revisionState) == .applied(running: true) {
+                    let result = current.revisionState.isComplete
+                        ? "当前副本的权限检查已通过。可以重新尝试之前失败的操作。"
+                        : "当前副本的权限检查已通过；历史跟踪缺口仍保留，详情见下方。"
+                    lastNotice = [lastNotice, "\(id) 已\(restart ? "重启" : "启动")，" + result]
+                        .compactMap { $0 }.joined(separator: "\n")
+                    break
+                }
+                if let current, !current.runningInstances.isEmpty,
+                   (current.runtimeRevisionState ?? current.revisionState) == .verificationFailed || !current.verificationPending.isEmpty {
+                    lastNotice = [lastNotice, "\(id) 已\(restart ? "重启" : "启动")，权限核验结果见下方。"]
                         .compactMap { $0 }.joined(separator: "\n")
                     break
                 }

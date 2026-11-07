@@ -56,7 +56,7 @@ public enum HelperRequest: Codable, Equatable, Sendable {
 
 /// Bumped whenever the App and the Helper must be updated together; the App compares it with its own.
 public enum HelperProtocol {
-    public static let version = 3
+    public static let version = 7
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -77,6 +77,17 @@ public struct PendingChangeInfo: Codable, Equatable, Sendable {
     }
 }
 
+/// The currently known processes of one instance, independent of missing lifecycle history.
+public struct RuntimeInstanceReport: Codable, Equatable, Sendable {
+    public var id: Int
+    public var revision: Int
+    public var entryPID: Int32?
+    public var knownPIDs: [Int32]
+    /// The representative process queried by the most recent sandbox check.
+    public var checkedPID: Int32?
+    public var verified: Bool?
+}
+
 public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var profileID: String
     public var savedRevision: Int
@@ -92,12 +103,24 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var launchAgent: LaunchAgentStatus?
     /// Why the running instances did not pass the Helper's sandbox check; empty when they did or it has not run yet.
     public var verificationIssues: [String]
-    /// Running instances whose process tree is not fully known; see `InstanceSnapshot.trackingIncomplete`.
+    /// Checks without a verdict, e.g. a temporary file that does not currently exist.
+    public var verificationPending: [String]
+    /// Absent positive-only grants; their availability is checked after the path appears.
+    public var verificationDeferred: [String]
+    /// Includes historical instances with no known processes left.
     public var untrackedInstances: [Int]
+    /// Only known running instances. Must not be used to claim complete revocation.
+    public var runtimeRevisionState: RevisionState?
+    public var runtimeInstances: [RuntimeInstanceReport]
+
+    public var historicalTrackingGaps: [Int] { untrackedInstances.filter { !runningInstances.contains($0) } }
+    public var activeTrackingGaps: [Int] { untrackedInstances.filter { runningInstances.contains($0) } }
 
     public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int,
                 detachedInstances: [Int] = [], unmanagedProcesses: [Int32] = [], launchAgent: LaunchAgentStatus? = nil,
-                verificationIssues: [String] = [], untrackedInstances: [Int] = []) {
+                verificationIssues: [String] = [], untrackedInstances: [Int] = [], verificationPending: [String] = [],
+                verificationDeferred: [String] = [], runtimeRevisionState: RevisionState? = nil,
+                runtimeInstances: [RuntimeInstanceReport] = []) {
         self.profileID = profileID
         self.savedRevision = savedRevision
         self.mode = mode
@@ -108,12 +131,17 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         self.unmanagedProcesses = unmanagedProcesses
         self.launchAgent = launchAgent
         self.verificationIssues = verificationIssues
+        self.verificationPending = verificationPending
         self.untrackedInstances = untrackedInstances
+        self.verificationDeferred = verificationDeferred
+        self.runtimeRevisionState = runtimeRevisionState
+        self.runtimeInstances = runtimeInstances
     }
 
     enum CodingKeys: String, CodingKey {
         case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances, unmanagedProcesses, launchAgent
-        case verificationIssues, untrackedInstances
+        case verificationIssues, untrackedInstances, verificationPending
+        case verificationDeferred, runtimeRevisionState, runtimeInstances
     }
 
     /// The app and the helper are updated separately; a report from an older helper has no `detachedInstances`.
@@ -129,7 +157,11 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         unmanagedProcesses = try c.decodeIfPresent([Int32].self, forKey: .unmanagedProcesses) ?? []
         launchAgent = try c.decodeIfPresent(LaunchAgentStatus.self, forKey: .launchAgent)
         verificationIssues = try c.decodeIfPresent([String].self, forKey: .verificationIssues) ?? []
+        verificationPending = try c.decodeIfPresent([String].self, forKey: .verificationPending) ?? []
         untrackedInstances = try c.decodeIfPresent([Int].self, forKey: .untrackedInstances) ?? []
+        verificationDeferred = try c.decodeIfPresent([String].self, forKey: .verificationDeferred) ?? []
+        runtimeRevisionState = try c.decodeIfPresent(RevisionState.self, forKey: .runtimeRevisionState)
+        runtimeInstances = try c.decodeIfPresent([RuntimeInstanceReport].self, forKey: .runtimeInstances) ?? []
     }
 }
 
@@ -246,6 +278,11 @@ public final class HelperService {
     /// Set only by the Helper's own sandbox check of the running process, never by the process.
     private var verified: [Int: Bool] = [:]
     private var verificationIssues: [Int: [String]] = [:]
+    private var verificationPending: [Int: [String]] = [:]
+    private var verificationDeferred: [Int: [String]] = [:]
+    private var checkedPID: [Int: Int32] = [:]
+    private var checkedAt: [Int: Date] = [:]
+    public static let verificationRetryInterval: TimeInterval = 5
     private var registeredAt: [Int: Date] = [:]
     /// What each instance must look like, fixed when its rules were handed out: a later app update
     /// that changes templates must not change what an already running process is checked against.
@@ -302,14 +339,18 @@ public final class HelperService {
                          supervisedByLaunchd: supervisedByLaunchd, restored: true)
         verified.removeValue(forKey: id)
         verificationIssues.removeValue(forKey: id)
+        verificationPending.removeValue(forKey: id)
+        verificationDeferred.removeValue(forKey: id)
+        checkedPID.removeValue(forKey: id)
+        checkedAt.removeValue(forKey: id)
         registeredAt.removeValue(forKey: id)
         expectations.removeValue(forKey: id)
         // Numbering restarts with the Helper; a new instance must never take a restored one's number.
         nextInstance = max(nextInstance, id + 1)
     }
 
-    /// Checks every running instance that has no verdict yet. Called on a timer and before each
-    /// status report, so a fresh start is confirmed as soon as its sandbox is in place.
+    /// Rechecks running instances periodically: paths and system restrictions can change while
+    /// a process runs. A stale failure or success must not remain the final verdict forever.
     public func verifyInstances() {
         guard let probe, let ids = try? store.profileIDs() else { return }
         let now = clock()
@@ -317,14 +358,23 @@ public final class HelperService {
             // An exited instance's verdict is never read again (revision state looks only at running ones).
             for snapshot in tracker.instances(ofProfile: profileID) where !snapshot.isRunning {
                 if registeredAt[snapshot.id] != nil || verified[snapshot.id] != nil || expectations[snapshot.id] != nil {
-                    log(profileID, .stopped, "运行副本 #\(snapshot.id) 已退出")
+                    log(profileID, .stopped, snapshot.trackingIncomplete
+                        ? "副本 #\(snapshot.id) 的已跟踪进程已退出" : "运行副本 #\(snapshot.id) 已退出",
+                        snapshot.trackingIncomplete ? ["此前的子进程记录不完整，不能据此确认所有子进程都已退出。"] : [])
                 }
                 verified.removeValue(forKey: snapshot.id)
                 verificationIssues.removeValue(forKey: snapshot.id)
+                verificationPending.removeValue(forKey: snapshot.id)
+                verificationDeferred.removeValue(forKey: snapshot.id)
+                checkedPID.removeValue(forKey: snapshot.id)
+                checkedAt.removeValue(forKey: snapshot.id)
                 registeredAt.removeValue(forKey: snapshot.id)
                 expectations.removeValue(forKey: snapshot.id)
             }
-            for snapshot in tracker.instances(ofProfile: profileID) where snapshot.isRunning && verified[snapshot.id] == nil {
+            for snapshot in tracker.instances(ofProfile: profileID) where snapshot.isRunning {
+                if let checked = checkedAt[snapshot.id], now.timeIntervalSince(checked) < Self.verificationRetryInterval { continue }
+                let previous = verified[snapshot.id]
+                let previousIssues = verificationIssues[snapshot.id]
                 // A restored instance's rules were handed out by an earlier Helper; recompiling its revision is the best evidence left.
                 if expectations[snapshot.id] == nil, let profile = try? store.revision(profileID, snapshot.revision),
                    let policy = try? compiler.compile(profile, catalog: catalog) {
@@ -336,23 +386,52 @@ public final class HelperService {
                 }
                 // Every process of an instance inherits the sandbox its root applied before exec.
                 guard let pid = (snapshot.entry ?? snapshot.liveProcesses.min())?.pid else { continue }
-                switch SandboxVerification.verify(pid: pid, expectations: expected, probe: probe) {
-                case .passed:
+                checkedAt[snapshot.id] = now
+                checkedPID[snapshot.id] = pid
+                verificationDeferred.removeValue(forKey: snapshot.id)
+                let verdict = SandboxVerification.verify(pid: pid, expectations: expected, probe: probe)
+                switch verdict {
+                case .passed, .passedWithDeferred:
                     verified[snapshot.id] = true
                     verificationIssues.removeValue(forKey: snapshot.id)
-                    log(profileID, .verified, "运行副本 #\(snapshot.id) 的保护已确认", ["使用修订 \(snapshot.revision) 的权限"])
+                    verificationPending.removeValue(forKey: snapshot.id)
+                    if case let .passedWithDeferred(paths) = verdict { verificationDeferred[snapshot.id] = paths }
+                    if previous != true {
+                        var details = ["使用修订 \(snapshot.revision) 的权限；核验进程 PID \(pid)"]
+                        if let paths = verificationDeferred[snapshot.id] {
+                            details.append("以下授权路径尚未出现，出现后自动补查：" + paths.joined(separator: "、"))
+                        }
+                        log(profileID, .verified, "运行副本 #\(snapshot.id) 的可用权限检查已通过", details)
+                    }
                 case let .failed(issues):
                     fail(snapshot.id, issues)
-                    log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有通过保护确认", issues)
+                    if previous != false || previousIssues != issues {
+                        log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有通过保护确认", issues)
+                    }
+                case let .inconclusive(reasons):
+                    verified.removeValue(forKey: snapshot.id)
+                    verificationIssues.removeValue(forKey: snapshot.id)
+                    verificationPending[snapshot.id] = reasons
                 case .notSandboxed:
                     // A restored instance has been running for a while; it gets no grace period.
                     let deadline = registeredAt[snapshot.id].map { $0.addingTimeInterval(Self.sandboxGracePeriod) } ?? now
                     if now >= deadline {
-                        fail(snapshot.id, ["进程没有进入沙箱，它不受这份权限限制"])
-                        log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有进入沙箱")
+                        let issues = ["进程没有进入沙箱，它不受这份权限限制"]
+                        fail(snapshot.id, issues)
+                        if previous != false || previousIssues != issues {
+                            log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有进入沙箱")
+                        }
+                    } else {
+                        verified.removeValue(forKey: snapshot.id)
+                        verificationIssues.removeValue(forKey: snapshot.id)
+                        verificationPending.removeValue(forKey: snapshot.id)
+                        // Do not delay the first confirmation while the launcher enters its sandbox.
+                        checkedAt.removeValue(forKey: snapshot.id)
                     }
                 case .unavailable:
-                    break
+                    verified.removeValue(forKey: snapshot.id)
+                    verificationIssues.removeValue(forKey: snapshot.id)
+                    verificationPending[snapshot.id] = ["系统暂时无法查询运行进程的保护状态"]
                 }
             }
         }
@@ -370,6 +449,8 @@ public final class HelperService {
     private func fail(_ instance: Int, _ issues: [String]) {
         verified[instance] = false
         verificationIssues[instance] = issues
+        verificationPending.removeValue(forKey: instance)
+        verificationDeferred.removeValue(forKey: instance)
     }
 
     public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {
@@ -410,7 +491,8 @@ public final class HelperService {
     /// One sandbox denial from the unified log; only denials of managed processes are kept.
     public func observe(denial: SandboxDenial) {
         guard let access = denial.access, let instance = tracker.owner(ofPID: denial.pid) else { return }
-        record(Observation(instance: instance, access: access, denied: true, at: clock()), instance: instance)
+        record(Observation(instance: instance, access: access, denied: true, at: clock(),
+                           networkTarget: denial.networkEndpoint?.rawValue, processName: denial.process, pid: denial.pid), instance: instance)
     }
 
     private func record(_ observation: Observation, instance: Int) {
@@ -609,6 +691,10 @@ public final class HelperService {
         tracker.register(instance: instance, profileID: profileID, revision: revision, root: process, supervisedByLaunchd: supervisedByLaunchd)
         verified.removeValue(forKey: instance)
         verificationIssues.removeValue(forKey: instance)
+        verificationPending.removeValue(forKey: instance)
+        verificationDeferred.removeValue(forKey: instance)
+        checkedPID.removeValue(forKey: instance)
+        checkedAt.removeValue(forKey: instance)
         registeredAt[instance] = clock()
         expectations[instance] = SandboxVerification.expectations(for: policy, environment: environment)
         log(profileID, .started, "运行副本 #\(instance) 已启动", ["使用修订 \(revision) 的权限", supervisedByLaunchd ? "由 AgentGuard 启动项启动" : "由 guard run 启动"])
@@ -645,6 +731,10 @@ public final class HelperService {
         for instance in tracker.removeInstances(ofProfile: profileID) {
             verified.removeValue(forKey: instance)
             verificationIssues.removeValue(forKey: instance)
+            verificationPending.removeValue(forKey: instance)
+            verificationDeferred.removeValue(forKey: instance)
+            checkedPID.removeValue(forKey: instance)
+            checkedAt.removeValue(forKey: instance)
             registeredAt.removeValue(forKey: instance)
             expectations.removeValue(forKey: instance)
         }
@@ -765,7 +855,15 @@ public final class HelperService {
                 detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id),
                 unmanagedProcesses: unmanaged[id]?.map(\.pid) ?? [],
                 verificationIssues: instances.filter(\.isRunning).flatMap { verificationIssues[$0.id] ?? [] },
-                untrackedInstances: instances.filter(\.trackingIncomplete).map(\.id)
+                untrackedInstances: instances.filter(\.trackingIncomplete).map(\.id),
+                verificationPending: instances.filter(\.isRunning).flatMap { verificationPending[$0.id] ?? [] },
+                verificationDeferred: Array(Set(instances.filter(\.isRunning).flatMap { verificationDeferred[$0.id] ?? [] })).sorted(),
+                runtimeRevisionState: RevisionState.evaluateKnownProcesses(savedRevision: latest.revision, instances: instances, verified: verified),
+                runtimeInstances: instances.filter(\.isRunning).map {
+                    RuntimeInstanceReport(id: $0.id, revision: $0.revision, entryPID: $0.entry?.pid,
+                                          knownPIDs: $0.liveProcesses.map(\.pid).sorted(),
+                                          checkedPID: checkedPID[$0.id], verified: verified[$0.id])
+                }
             )
         }
         return StatusReport(profiles: profiles, collectorProblems: collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description))

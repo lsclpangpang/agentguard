@@ -88,18 +88,24 @@ public struct NetworkPolicy: Codable, Hashable, Sendable {
     public var outboundTCP: Toggle
     public var listen: Toggle
     public var udp: Toggle
+    /// Nil preserves existing profiles' inherited rules until the user makes a choice.
+    /// An explicit denial overrides migrated allow rules for this one service.
+    public var systemDNS: Toggle?
 
-    public init(loopbackTCPConnect: [Int] = [], outboundTCP: Toggle = .denied, listen: Toggle = .denied, udp: Toggle = .denied) {
+    public init(loopbackTCPConnect: [Int] = [], outboundTCP: Toggle = .denied, listen: Toggle = .denied, udp: Toggle = .denied,
+                systemDNS: Toggle? = nil) {
         self.loopbackTCPConnect = loopbackTCPConnect
         self.outboundTCP = outboundTCP
         self.listen = listen
         self.udp = udp
+        self.systemDNS = systemDNS
     }
 
     enum CodingKeys: String, CodingKey {
         case loopbackTCPConnect = "loopback_tcp_connect"
         case outboundTCP = "outbound_tcp"
         case listen, udp
+        case systemDNS = "system_dns"
     }
 }
 

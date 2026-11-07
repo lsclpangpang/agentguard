@@ -53,13 +53,14 @@ public struct SystemSandboxProbe: SandboxProbe {
             target.withCString { value in
                 switch operation {
                 case .machLookup: return agentguard_sandbox_check_global_name(pid, op, value)
-                case .fileRead, .fileWrite: return agentguard_sandbox_check_path(pid, op, value)
+                case .fileRead, .fileWrite, .unixConnect: return agentguard_sandbox_check_path(pid, op, value)
                 }
             }
         }
         switch result {
         case 0: return .allowed
         case 1: return .denied
+        case -2: return .missing
         default: return .unavailable
         }
     }

@@ -8,6 +8,7 @@ struct Card<Content: View, Accessory: View>: View {
     let title: String
     let systemImage: String
     var subtitle: String?
+    var iconTint: Color = .accentColor
     @ViewBuilder var accessory: () -> Accessory
     @ViewBuilder var content: () -> Content
 
@@ -16,9 +17,9 @@ struct Card<Content: View, Accessory: View>: View {
             HStack(alignment: .center, spacing: 8) {
                 Image(systemName: systemImage)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(iconTint)
                     .frame(width: 22, height: 22)
-                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.accentColor.opacity(0.12)))
+                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(iconTint.opacity(0.12)))
                 Text(title).font(.headline)
                 Spacer()
                 accessory()
@@ -40,8 +41,20 @@ struct Card<Content: View, Accessory: View>: View {
 }
 
 extension Card where Accessory == EmptyView {
-    init(title: String, systemImage: String, subtitle: String? = nil, @ViewBuilder content: @escaping () -> Content) {
-        self.init(title: title, systemImage: systemImage, subtitle: subtitle, accessory: { EmptyView() }, content: content)
+    init(title: String, systemImage: String, subtitle: String? = nil, iconTint: Color = .accentColor,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.init(title: title, systemImage: systemImage, subtitle: subtitle, iconTint: iconTint, accessory: { EmptyView() }, content: content)
+    }
+}
+
+/// A separate, compact indicator so a successful runtime check is not colored as a failure.
+struct TrackingGapIndicator: View {
+    var body: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .help("部分子进程记录不完整，详情见概况")
+            .accessibilityLabel("部分子进程记录不完整")
     }
 }
 

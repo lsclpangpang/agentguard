@@ -333,7 +333,7 @@ struct NewProgramWizard: View {
                     if model.restartingProfiles.contains(name) {
                         HStack { ProgressView().controlSize(.small); Text("正在启动，等待确认保护…") }
                     } else {
-                        Label(summary.headline, systemImage: Theme.symbol(summary.level)).foregroundStyle(Theme.color(summary.level))
+                        Label(summary.headline, systemImage: Theme.symbol(summary.headlineLevel)).foregroundStyle(Theme.color(summary.headlineLevel))
                         Text(summary.impact).font(.callout).foregroundStyle(.secondary)
                         if status?.runningInstances.isEmpty ?? true { Button("启动 \(name)") { model.installLaunchAgent(name) }.buttonStyle(.borderedProminent) }
                     }
@@ -346,10 +346,14 @@ struct NewProgramWizard: View {
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
                     if !(status?.runningInstances.isEmpty ?? true) {
-                        Label(summary.headline, systemImage: Theme.symbol(summary.level)).foregroundStyle(Theme.color(summary.level))
+                        Label(summary.headline, systemImage: Theme.symbol(summary.headlineLevel)).foregroundStyle(Theme.color(summary.headlineLevel))
                     } else {
                         Text("等待在终端中运行…").font(.caption).foregroundStyle(.secondary)
                     }
+                }
+                if !(status?.untrackedInstances.isEmpty ?? true) {
+                    Label("部分子进程记录不完整，详情见程序概况。", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
                 }
             }
             if let saveError {

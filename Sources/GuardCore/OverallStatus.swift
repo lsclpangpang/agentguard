@@ -96,13 +96,17 @@ public struct OverallStatus: Equatable, Sendable {
             }
             if object.unmanagedInstances > 0 { findings.append((.problem, "\(name)：\(object.unmanagedInstances) 个副本没有经过 AgentGuard 运行，不受保护")) }
             if object.detachedInstances > 0 { findings.append((.attention, "\(name)：启动入口已退出，程序异常后可能不会自动重启")) }
-            if object.untrackedInstances > 0 { findings.append((.attention, "\(name)：暂时无法确认所有运行副本的保护状态")) }
+            if object.untrackedInstances > 0, case .unconfirmed = object.revision {
+                // The revision message below already describes this same gap.
+            } else if object.untrackedInstances > 0 {
+                findings.append((.attention, "\(name)：子进程跟踪记录不完整"))
+            }
             switch object.revision {
             case .applied: break
             case .verificationFailed: findings.append((.problem, "\(name)：保护未通过确认"))
             case .inconsistent: findings.append((.problem, "\(name)：运行中的权限与保存的不一致"))
             case .oldInstancesAlive: findings.append((.attention, "\(name)：新权限已保存，重启后生效"))
-            case .unconfirmed: findings.append((.attention, "\(name)：暂时无法确认旧副本是否已退出"))
+            case .unconfirmed: findings.append((.attention, "\(name)：子进程跟踪记录不完整，部分旧进程是否退出仍待确认"))
             case .awaitingVerification: findings.append((.attention, "\(name)：正在确认保护"))
             }
             if object.pendingItems > 0 { findings.append((.attention, "\(name)：\(object.pendingItems) 项活动需要处理")) }
