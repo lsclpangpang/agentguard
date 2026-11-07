@@ -90,7 +90,8 @@ import Testing
             Observation(instance: 1, access: .unixSocket(path: "/private/var/run/mDNSResponder", operation: "network-outbound"),
                         denied: true, networkTarget: "/private/var/run/mDNSResponder"),
         ]
-        #expect(engine.pendingItems(observations: observations, policy: try Fixtures.compile(Fixtures.profile()), enabledTemplates: []).isEmpty)
+        #expect(engine.pendingItems(observations: observations, policy: try Fixtures.compile(Fixtures.profile()), enabledTemplates: [])
+            .map(\.suggestion) == [.systemDNS])
         #expect(observations.last?.summary == "连接本机套接字 /private/var/run/mDNSResponder")
     }
 }

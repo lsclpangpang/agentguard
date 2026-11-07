@@ -3,6 +3,8 @@ public enum SandboxOperation: String, Sendable {
     case fileRead = "file-read-data"
     case fileWrite = "file-write-data"
     case machLookup = "mach-lookup"
+    /// Unix-domain sockets use the path filter, unlike IP endpoints.
+    case unixConnect = "network-outbound"
 }
 
 /// What one probe of a running process must find for its revision to count as in effect.
@@ -69,6 +71,13 @@ public enum SandboxVerification {
         // Unprotected observation runs with `(allow default)`; only the built-in denials hold.
         guard !policy.mode.liftsBoundary else { return result }
 
+        if let systemDNS = policy.network.systemDNS {
+            result.append(SandboxExpectation(operation: .unixConnect, target: SystemDNS.socketPath,
+                                             allowed: systemDNS == .allowed,
+                                             failure: systemDNS == .allowed
+                                                ? "已授权的系统域名解析服务不能连接"
+                                                : "已设为阻止的系统域名解析服务仍可连接"))
+        }
         if let unlisted = unlistedProbe(for: policy, environment: environment) {
             result.append(SandboxExpectation(operation: .fileRead, target: unlisted, allowed: false,
                                              failure: "未授权的位置 \(unlisted) 可以读取：默认拒绝没有生效，或有旧规则放开了它"))

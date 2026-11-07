@@ -519,6 +519,8 @@ final class AppModel: ObservableObject {
                 profile.network.outboundTCP = .allowed
             case .listen:
                 profile.network.listen = .allowed
+            case .systemDNS:
+                profile.network.systemDNS = .allowed
             }
         }
     }

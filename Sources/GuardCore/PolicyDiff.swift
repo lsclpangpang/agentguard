@@ -17,6 +17,7 @@ public enum PolicyChange: Hashable, Sendable {
     case outboundTCPChanged(to: Toggle)
     case listenChanged(to: Toggle)
     case udpChanged(to: Toggle)
+    case systemDNSChanged(from: Toggle?, to: Toggle?)
     case unrestrictedExecChanged(to: Bool)
     case extraRuleAdded(String)
     case extraRuleRemoved(String)
@@ -41,6 +42,9 @@ public enum PolicyChange: Hashable, Sendable {
         // Dropping a hash or swapping it for another both admit a binary that was not admitted before.
         case let .execHashChanged(_, from, _): return from != nil
         case let .outboundTCPChanged(to), let .listenChanged(to), let .udpChanged(to): return to == .allowed
+        case let .systemDNSChanged(from, to):
+            // Removing an explicit denial can reveal an inherited allow.
+            return to == .allowed || (from == .denied && to == nil)
         }
     }
 }
@@ -65,6 +69,9 @@ public struct PolicyDiff: Hashable, Sendable {
         if old.network.outboundTCP != new.network.outboundTCP { changes.append(.outboundTCPChanged(to: new.network.outboundTCP)) }
         if old.network.listen != new.network.listen { changes.append(.listenChanged(to: new.network.listen)) }
         if old.network.udp != new.network.udp { changes.append(.udpChanged(to: new.network.udp)) }
+        if old.network.systemDNS != new.network.systemDNS {
+            changes.append(.systemDNSChanged(from: old.network.systemDNS, to: new.network.systemDNS))
+        }
         let oldRules = Set(old.extraRules), newRules = Set(new.extraRules)
         changes += newRules.subtracting(oldRules).sorted().map(PolicyChange.extraRuleAdded)
         changes += oldRules.subtracting(newRules).sorted().map(PolicyChange.extraRuleRemoved)
@@ -151,6 +158,7 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .outboundTCPChanged(to): return "outbound|\(to.rawValue)"
         case let .listenChanged(to): return "listen|\(to.rawValue)"
         case let .udpChanged(to): return "udp|\(to.rawValue)"
+        case let .systemDNSChanged(from, to): return "system-dns|\(from?.rawValue ?? "inherited")|\(to?.rawValue ?? "inherited")"
         case let .unrestrictedExecChanged(to): return "exec-any|\(to)"
         case let .extraRuleAdded(rule): return "rule+|\(rule)"
         case let .extraRuleRemoved(rule): return "rule-|\(rule)"
@@ -208,6 +216,8 @@ public struct PolicyDiff: Hashable, Sendable {
         case let .outboundTCPChanged(to): return "~ 对外 TCP 连接：\(toggle(to))"
         case let .listenChanged(to): return "~ 监听端口：\(toggle(to))"
         case let .udpChanged(to): return "~ UDP：\(toggle(to))"
+        case let .systemDNSChanged(_, to):
+            return "~ \(SystemDNS.title)：\(to.map(toggle) ?? "沿用已有规则")；仅连接 \(SystemDNS.socketPath)"
         case let .unrestrictedExecChanged(to): return (to ? "+" : "-") + " 允许执行任意程序"
         case let .extraRuleAdded(rule): return "+ 原样规则 \(rule)"
         case let .extraRuleRemoved(rule): return "- 原样规则 \(rule)"

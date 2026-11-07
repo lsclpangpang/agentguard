@@ -43,6 +43,7 @@ public enum Suggestion: Hashable, Sendable, Codable {
     case loopbackPort(Int)
     case outboundTCP
     case listen
+    case systemDNS
 }
 
 public struct PendingItem: Hashable, Sendable, Codable {
@@ -160,7 +161,7 @@ public struct SuggestionEngine: Sendable {
         var files: [String: (path: CanonicalPath, write: Bool, tally: Tally)] = [:]
         var execs: [String: Tally] = [:]
         var ports: [Int: Tally] = [:]
-        var outbound = Tally(), listen = Tally()
+        var outbound = Tally(), listen = Tally(), systemDNS = Tally()
 
         for observation in observations {
             switch observation.access {
@@ -203,10 +204,12 @@ public struct SuggestionEngine: Sendable {
             case .listen:
                 if observation.networkEndpoint?.transport == "UDP" { continue }
                 if policy.network.listen != .allowed { listen.add(observation, sample: observation.networkTarget) }
-            case .unixSocket:
-                // Neither a file grant nor a TCP permission grants Unix socket access.
-                // Show the observation without suggesting an unrelated permission.
-                continue
+            case let .unixSocket(path, operation):
+                // Only this known service gets a scoped suggestion. Other sockets must never
+                // turn into a file grant or a general TCP/network grant.
+                if SystemDNS.matches(path: path, operation: operation), policy.network.systemDNS != .allowed {
+                    systemDNS.add(observation, sample: SystemDNS.socketPath)
+                }
             }
         }
 
@@ -221,6 +224,7 @@ public struct SuggestionEngine: Sendable {
         items += ports.map { $0.value.item(.loopbackPort($0.key), sensitive: false) }
         if outbound.count > 0 { items.append(outbound.item(.outboundTCP, sensitive: false)) }
         if listen.count > 0 { items.append(listen.item(.listen, sensitive: false)) }
+        if systemDNS.count > 0 { items.append(systemDNS.item(.systemDNS, sensitive: false)) }
         return items.sorted(by: Self.order)
     }
 
@@ -284,6 +288,7 @@ public struct SuggestionEngine: Sendable {
             return (3, String(repeating: "0", count: max(0, 5 - digits.count)) + digits)
         case .outboundTCP: return (4, "")
         case .listen: return (5, "")
+        case .systemDNS: return (6, "")
         }
     }
 }

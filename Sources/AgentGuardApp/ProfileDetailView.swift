@@ -329,6 +329,10 @@ private struct EffectivePermissionsCard: View {
                 }
                 Divider().padding(.vertical, 4)
                 Text(networkLine(overview)).font(.callout)
+                if let systemDNS = overview.network.systemDNS {
+                    Text("\(SystemDNS.title)：\(systemDNS == .allowed ? "允许" : "阻止")（你设置的，仅连接 \(SystemDNS.socketPath)）")
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                }
                 Text(execLine(overview)).font(.callout).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -800,7 +804,7 @@ private struct ProgramsAndNetworkCard: View {
                     Notice(kind: .warning, text: notice)
                 }
                 if !overview.unverifiedNetwork.isEmpty || !overview.unverifiedExec.isEmpty {
-                    Notice(kind: .warning, text: "下方列表和开关是显式设置。旧规则或系统基础规则可能继续授权，关闭开关或移除列表项不能保证完全收回。")
+                    Notice(kind: .warning, text: "TCP/UDP、监听和程序列表是显式设置。旧规则或系统基础规则可能继续提供相同访问，修改这些设置不一定能完全收回。")
                 }
                 if profile.unrestrictedExec {
                     Notice(kind: .warning, text: "允许运行任意程序（从现有安装迁移时保留）。")
@@ -847,6 +851,29 @@ private struct ProgramsAndNetworkCard: View {
                 }
 
                 Divider()
+
+                SwiftUI.Toggle(isOn: Binding(
+                    get: { profile.network.systemDNS == .allowed },
+                    set: { model.setSystemDNS($0, in: profile.id) })) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(SystemDNS.title)
+                        Text(SystemDNS.detail).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(SystemDNS.socketPath).font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                }
+                .toggleStyle(.switch)
+                .accessibilityIdentifier("system-dns-toggle")
+                if profile.network.systemDNS == nil {
+                    HStack {
+                        Text("尚未单独设置；当前是否能连接，以运行记录为准。").font(.caption).foregroundStyle(.secondary)
+                        Button("明确阻止") { model.setSystemDNS(false, in: profile.id) }.controlSize(.small)
+                    }
+                }
+                Text(profile.mode == .unprotectedObserve ? "当前处于无保护观察模式，不执行这项限制。"
+                     : "修改后需重启程序生效；关闭会明确阻止这个服务连接。")
+                    .font(.caption).foregroundStyle(.secondary)
 
                 networkToggle("允许对外 TCP 连接", detail: "Agent 连接模型服务通常需要打开", keyPath: \.outboundTCP)
                 networkToggle("允许接收连接（监听端口）", detail: "只有提供本地服务的程序需要", keyPath: \.listen)

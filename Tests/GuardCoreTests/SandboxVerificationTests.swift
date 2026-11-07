@@ -8,6 +8,7 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
     var readable: [String] = []
     var writable: [String] = []
     var machAllowed: Set<String> = []
+    var unixAllowed: Set<String> = []
     var unavailable = false
     var missing: Set<String> = []
     private(set) var probedPIDs: [Int32] = []
@@ -23,6 +24,7 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
         func under(_ roots: [String]) -> Bool { roots.contains { target == $0 || target.hasPrefix($0 + "/") } }
         switch operation {
         case .machLookup: return machAllowed.contains(target) ? .allowed : .denied
+        case .unixConnect: return unixAllowed.contains(target) ? .allowed : .denied
         case .fileRead: return under(readable + writable) ? .allowed : .denied
         case .fileWrite: return under(writable) ? .allowed : .denied
         }

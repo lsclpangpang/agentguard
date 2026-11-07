@@ -92,6 +92,7 @@ extension Suggestion {
         case .loopbackPort: return "point.3.connected.trianglepath.dotted"
         case .outboundTCP: return "globe"
         case .listen: return "antenna.radiowaves.left.and.right"
+        case .systemDNS: return "network"
         }
     }
 
@@ -103,6 +104,7 @@ extension Suggestion {
         case let .loopbackPort(port): return "连接本机端口 \(port)"
         case .outboundTCP: return "对外 TCP 连接"
         case .listen: return "监听端口"
+        case .systemDNS: return SystemDNS.title
         }
     }
 }

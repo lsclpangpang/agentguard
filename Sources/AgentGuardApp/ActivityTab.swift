@@ -157,6 +157,7 @@ struct ActivityTab: View {
 
     @ViewBuilder private var recent: some View {
         if let recent = log?.recent, !recent.isEmpty {
+            let canAllowSystemDNS = model.profile(profileID)?.network.systemDNS != .allowed
             Card(title: "最近的访问记录", systemImage: "list.bullet.rectangle") {
                 DisclosureGroup(isExpanded: $showRecent) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -169,7 +170,13 @@ struct ActivityTab: View {
                             RecentAccessRow(observation: observation, expanded: Binding(
                                 get: { expandedAccess == observation },
                                 set: { expandedAccess = $0 ? observation : nil }
-                            ))
+                            ), allowSystemDNS: observation.denied && observation.isSystemDNS
+                                && canAllowSystemDNS ? {
+                                    model.acceptAll([PendingItem(suggestion: .systemDNS, sensitive: false,
+                                                                 evidence: observation.count, samples: [SystemDNS.socketPath],
+                                                                 denied: observation.count, firstSeen: observation.at, lastSeen: observation.at)],
+                                                    for: profileID)
+                                } : nil)
                         }
                     }
                     .padding(.top, 6)
@@ -184,6 +191,7 @@ struct ActivityTab: View {
 private struct RecentAccessRow: View {
     let observation: Observation
     @Binding var expanded: Bool
+    var allowSystemDNS: (() -> Void)?
 
     private var endpoint: NetworkEndpoint? { observation.networkEndpoint }
     private var isSocket: Bool {
@@ -227,7 +235,8 @@ private struct RecentAccessRow: View {
                         .fixedSize(horizontal: false, vertical: observation.isNetwork)
                         .textSelection(.enabled)
                     if observation.isNetwork {
-                        Text(isSocket ? "本机进程间通信 · 不使用网络端口"
+                        Text(observation.isSystemDNS ? "\(SystemDNS.title) · 本机服务"
+                             : isSocket ? "本机进程间通信 · 不使用网络端口"
                              : "端口：\(port) · 传输协议：\(endpoint?.transport ?? "未记录") · URL：\(endpoint?.url == nil ? "系统未提供" : "见详情")")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -238,6 +247,11 @@ private struct RecentAccessRow: View {
                 }
                 Spacer(minLength: 4)
                 if observation.isNetwork {
+                    if let allowSystemDNS {
+                        Button("允许系统 DNS…", action: allowSystemDNS).controlSize(.small)
+                            .accessibilityLabel("允许系统域名解析与服务发现，仅连接 \(SystemDNS.socketPath)")
+                            .accessibilityIdentifier("system-dns-allow-\(eventIdentifier)")
+                    }
                     Button(expanded ? "收起" : "详情") { expanded.toggle() }.buttonStyle(.borderless).controlSize(.small)
                         .accessibilityLabel("\(expanded ? "收起" : "查看")连接详情：\(eventTime)，\(observation.summary)，\(process)，端口 \(port)")
                         .accessibilityIdentifier("network-details-\(eventIdentifier)")
@@ -248,6 +262,10 @@ private struct RecentAccessRow: View {
             }
             if observation.isNetwork && expanded {
                 VStack(alignment: .leading, spacing: 5) {
+                    if observation.isSystemDNS {
+                        Text(SystemDNS.detail).font(.caption)
+                        Text("这条记录只显示连接了系统服务，未记录具体查询的域名。").font(.caption).foregroundStyle(.secondary)
+                    }
                     ForEach(fields.indices, id: \.self) { index in
                         HStack(alignment: .top, spacing: 10) {
                             Text(fields[index].0).foregroundStyle(.secondary).frame(width: 70, alignment: .leading)
@@ -333,6 +351,8 @@ private struct PendingRow<Actions: View>: View {
             guard let template = templates.first(where: { $0.id == id }) else { return [item.suggestion.title] }
             return template.files.map { "\($0.access == .readWrite ? "读写" : "只读")\($0.kind == .directory ? "目录" : "文件") \($0.path)\($0.readsSecrets ? "（含凭证）" : "")" }
                 + template.exec.map { "运行 \($0.path)" } + template.loopbackPorts.map { "连接本机端口 \($0)" }
+        case .systemDNS:
+            return ["仅连接本机服务 \(SystemDNS.socketPath)", SystemDNS.detail]
         default:
             return [item.suggestion.title]
         }
