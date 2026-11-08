@@ -25,7 +25,7 @@ final class FakeProbe: SandboxProbe, @unchecked Sendable {
         switch operation {
         case .machLookup: return machAllowed.contains(target) ? .allowed : .denied
         case .unixConnect: return unixAllowed.contains(target) ? .allowed : .denied
-        case .fileRead: return under(readable + writable) ? .allowed : .denied
+        case .fileRead, .fileMetadata: return under(readable + writable) ? .allowed : .denied
         case .fileWrite: return under(writable) ? .allowed : .denied
         }
     }

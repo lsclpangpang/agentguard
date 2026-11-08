@@ -1,6 +1,7 @@
 /// One sandbox operation the Helper can ask the kernel about for another process.
-public enum SandboxOperation: String, Sendable {
+public enum SandboxOperation: String, Hashable, Sendable {
     case fileRead = "file-read-data"
+    case fileMetadata = "file-read-metadata"
     case fileWrite = "file-write-data"
     case machLookup = "mach-lookup"
     /// Unix-domain sockets use the path filter, unlike IP endpoints.

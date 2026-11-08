@@ -44,6 +44,36 @@ public enum CodeSigning {
         return hash
     }
 
+    /// A verified identity of the candidate on disk. This is not the identity of a running process.
+    public static func validatedCDHash(atPath path: String, expectedIdentifier: String? = nil) throws -> String {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &staticCode) == errSecSuccess, let staticCode,
+              SecStaticCodeCheckValidity(staticCode, SecCSFlags(rawValue: kSecCSCheckAllArchitectures), nil) == errSecSuccess
+        else { throw PlatformError.signing("\(path) 的签名校验失败") }
+        let info = try signingInformation(staticCode)
+        guard expectedIdentifier == nil || expectedIdentifier == info.identifier,
+              let hash = info.cdhash else { throw PlatformError.signing("\(path) 的代码身份不符合预期") }
+        return hash
+    }
+
+    /// Freeze this value once at startup. It comes from the running code object, rather than
+    /// reopening its executable path after an App update may have replaced that path.
+    public static func runningCDHash() throws -> String {
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCheckValidity(code, [], nil) == errSecSuccess else {
+            throw PlatformError.signing("无法核验当前运行代码")
+        }
+        // SecCodeCopySigningInformation explicitly accepts Code or StaticCode objects, although
+        // its C declaration uses SecStaticCodeRef. Validate the dynamic code on both sides because
+        // some signature information may be read from disk.
+        let info = try signingInformation(unsafeBitCast(code, to: SecStaticCode.self))
+        guard SecCodeCheckValidity(code, [], nil) == errSecSuccess, let hash = info.cdhash else {
+            throw PlatformError.signing("无法确认当前运行代码的签名身份")
+        }
+        return hash
+    }
+
     private static func signingInformation(_ code: SecStaticCode) throws -> (identifier: String?, team: String?, cdhash: String?) {
         var dictionary: CFDictionary?
         guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &dictionary) == errSecSuccess,

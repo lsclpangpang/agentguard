@@ -14,7 +14,17 @@ final class HelperCore {
     private var config: AgentGuardConfig?
     private var service: HelperService?
     private let collector = Collector()
+    private let accessLogBudget = EventQueueBudget()
+    private let helperSessionID = UUID().uuidString.lowercased()
+    private var accessLogStore: AccessLogStore?
+    private var accessLogRequestsInFlight = 0
+    private var accessLogHealthPollInFlight = false
+    private var accessLogDiagnostic = ""
+    private var accessLogDiagnosticAt: Date?
+    private var shuttingDown = false
     private let bundleMacOSDirectory: String
+    private let helperRuntimeCodeHash: String?
+    private var collectorInstallation: CollectorInstallationStatus?
     private var started = false
     private var processBirths: [ProcessKey: UInt64] = [:]
     private var launchStatusMonitor: LaunchStatusMonitor?
@@ -22,8 +32,9 @@ final class HelperCore {
     /// What the current request's stop achieved; reported instead of a bare success.
     private var operationStop: StopOutcome?
 
-    init(bundleMacOSDirectory: String) {
+    init(bundleMacOSDirectory: String, runtimeCodeHash: String? = nil) {
         self.bundleMacOSDirectory = bundleMacOSDirectory
+        self.helperRuntimeCodeHash = runtimeCodeHash
         self.identities = Self.readIdentities(bundleMacOSDirectory: bundleMacOSDirectory)
         if let data = FileManager.default.contents(atPath: paths.ownerPath), let record = try? OwnerRecord.decode(data) {
             adopt(record)
@@ -69,32 +80,72 @@ final class HelperCore {
         started = true
         // The collector daemon owns Full Disk Access; it is installed outside the app bundle so an
         // app rebuild (and the re-signing that follows) never invalidates that grant.
-        if case let .failed(reason) = CollectorInstaller.ensureInstalled(bundleMacOSDirectory: bundleMacOSDirectory) {
+        let installation: CollectorInstallationStatus
+        switch CollectorInstaller.ensureInstalled(bundleMacOSDirectory: bundleMacOSDirectory) {
+        case .installed: installation = .installedBundled
+        case .alreadyPresent: installation = .keptExisting
+        case .wouldReplaceOutdated: installation = .keptOutdated
+        case let .failed(reason):
+            installation = .failed(reason: reason)
             FileHandle.standardError.write(Data("采集器安装失败：\(reason)\n".utf8))
         }
-        collector.onLine = { [weak self] line in self?.queue.async {
+        queue.sync {
+            collectorInstallation = installation
+            service?.updateCollectorInstallation(installation)
+        }
+        collector.configureDelivery(on: queue, budget: accessLogBudget) { [weak self] batch in
             guard let self else { return }
-            if self.service?.managedInstance(of: line.process) != nil {
-                var births: [(ProcessKey, UInt64?)] = [(line.process, line.processStartTime)]
-                if case let .fork(child) = line.kind { births.append((child, line.relatedProcessStartTime)) }
-                if case let .exec(target, _) = line.kind {
-                    // Exec changes the audit-token image version but preserves process birth.
-                    let inherited = target.pid == line.process.pid ? self.processBirths[line.process] : nil
-                    births.append((target, line.relatedProcessStartTime ?? inherited))
-                }
-                for (key, birth) in births where self.processBirths[key] == nil {
-                    if let birth { self.processBirths[key] = birth }
+            for input in batch {
+                switch input {
+                case let .es(line):
+                    if let resolution = self.service?.resolveObservedProcess(line.process, startTime: line.processStartTime) {
+                        if let previous = resolution.previousKey {
+                            self.processBirths.removeValue(forKey: previous)
+                            // Resolution requires this exact birth. Install it before exec's
+                            // inheritance lookup, so even the first event can transition safely.
+                            if let birth = line.processStartTime { self.processBirths[line.process] = birth }
+                        }
+                        var births: [(ProcessKey, UInt64?)] = [(line.process, line.processStartTime)]
+                        if case let .fork(child) = line.kind {
+                            if let related = self.service?.resolveObservedProcess(child,
+                                startTime: line.relatedProcessStartTime, expectedInstance: resolution.instance),
+                               let previous = related.previousKey {
+                                self.processBirths.removeValue(forKey: previous)
+                                if let birth = line.relatedProcessStartTime { self.processBirths[child] = birth }
+                            }
+                            births.append((child, line.relatedProcessStartTime))
+                        }
+                        if case let .exec(target, _) = line.kind {
+                            let inherited = target.pid == line.process.pid ? self.processBirths[line.process] : nil
+                            births.append((target, line.relatedProcessStartTime ?? inherited))
+                        }
+                        for (key, birth) in births where self.processBirths[key] == nil {
+                            if let birth { self.processBirths[key] = birth }
+                        }
+                    }
+                    self.service?.observe(line: line)
+                    if case .exit = line.kind { self.processBirths.removeValue(forKey: line.process) }
+                case let .denial(denial):
+                    self.service?.observe(denial: denial)
+                case let .gap(gap):
+                    if gap.attributionIncomplete { self.service?.ingest(.gap) }
+                    self.service?.recordAccessLogGap(
+                        reason: gap.reasons.map(\.rawValue).sorted().joined(separator: ", "),
+                        droppedCount: gap.possibleUnknownLoss ? nil : gap.droppedCount, at: gap.lastAt,
+                        firstSequence: gap.firstSourceSequence, lastSequence: gap.lastSourceSequence,
+                        from: gap.firstAt, through: gap.lastAt
+                    )
                 }
             }
-            self.service?.observe(line: line)
-            if case .exit = line.kind { self.processBirths.removeValue(forKey: line.process) }
-        } }
-        collector.onDenial = { [weak self] denial in self?.queue.async { self?.service?.observe(denial: denial) } }
+            self.service?.updateAccessLogCoverage(fileEventsSubscribed: self.collector.coverageStatus().fileEventsSubscribed)
+        }
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self else { return }
             let health = self.collector.health()
             self.queue.async {
                 self.service?.updateCollectorHealth(health)
+                self.service?.updateAccessLogCoverage(fileEventsSubscribed: health.coverage.fileEventsSubscribed)
+                self.refreshAccessLogDiagnostics()
                 self.service?.updateRunningProcesses(ProcessFacts.allProcesses())
                 self.reconcileInstances()
             }
@@ -106,6 +157,57 @@ final class HelperCore {
             }
         }
         refreshCollector()
+    }
+
+    /// Trust and attribution are frozen on the state queue; bounded log reads run outside it.
+    func handle(_ data: Data, identity: CallerIdentity, process: ProcessKey, reply: @escaping (Data) -> Void) {
+        queue.async {
+            guard !self.shuttingDown else {
+                reply((try? HelperWire.encode(HelperResponse.failure(code: "helper_shutting_down"))) ?? Data())
+                return
+            }
+            if let request = try? HelperWire.decodeRequest(data) {
+                self.claimOwnershipIfNeeded(identity)
+                switch request {
+                case .accessLogStatus, .queryAccessLog, .exportAccessLogPage, .clearAccessLog:
+                    // Admit before preparation: clear preparation fixes its cutoff immediately.
+                    guard self.accessLogRequestsInFlight < 4 else {
+                        reply((try? HelperWire.encode(HelperResponse.failure(code: "access_log_busy"))) ?? Data())
+                        return
+                    }
+                default: break
+                }
+                if let work = self.service?.prepareAccessLogRequest(request, caller: identity, process: process) {
+                    self.accessLogRequestsInFlight += 1
+                    Task {
+                        let response = await work()
+                        self.queue.async {
+                            self.accessLogRequestsInFlight -= 1
+                            if case let .accessLogCleared(profileID, result) = response {
+                                self.service?.completeAccessLogClear(profileID: profileID, result: result)
+                            }
+                            reply((try? HelperWire.encode(response)) ?? Data())
+                        }
+                    }
+                    return
+                }
+            }
+            reply(self.handle(data, identity: identity, process: process))
+        }
+    }
+
+    /// A normal Helper stop seals and synchronizes its own logs; managed processes are untouched.
+    func shutdown(completion: @escaping () -> Void) {
+        queue.async {
+            guard !self.shuttingDown else { return }
+            self.shuttingDown = true
+            self.collector.flushPendingForAccessLogClear()
+            let store = self.accessLogStore
+            Task {
+                await store?.close()
+                completion()
+            }
+        }
     }
 
     func handle(_ data: Data, identity: CallerIdentity, process: ProcessKey) -> Data {
@@ -124,6 +226,7 @@ final class HelperCore {
             }
             if let service {
                 response = apply(service.handle(request, caller: identity, process: process), for: request)
+                if case .setAccessLogEnabled = request { refreshCollector() }
                 if case let .registerInstance(profileID, revision) = request,
                    case let .registered(instance, _) = response {
                     recordInstance(profileID: profileID, instance: instance, revision: revision, root: process)
@@ -138,6 +241,32 @@ final class HelperCore {
     }
 
     // MARK: Ownership
+
+    /// A failed disk cannot save its own error record. Keep a bounded, rate-limited system
+    /// diagnostic as well; one outstanding poll prevents slow storage from growing a task queue.
+    private func refreshAccessLogDiagnostics() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !shuttingDown, !accessLogHealthPollInFlight, let store = accessLogStore else { return }
+        accessLogHealthPollInFlight = true
+        Task {
+            let status = await store.status()
+            self.queue.async {
+                self.accessLogHealthPollInFlight = false
+                let message = String(status.errors.prefix(4).joined(separator: "; ").prefix(2048))
+                guard !message.isEmpty else {
+                    self.accessLogDiagnostic = ""
+                    return
+                }
+                let now = Date()
+                let interval: TimeInterval = message == self.accessLogDiagnostic ? 300 : 60
+                guard self.accessLogDiagnosticAt.map({ now.timeIntervalSince($0) >= interval }) ?? true else { return }
+                self.accessLogDiagnostic = message
+                self.accessLogDiagnosticAt = now
+                Logger(subsystem: "com.lsclpangpang.agentguard", category: "access-log")
+                    .error("访问日志保存异常：\(message, privacy: .public)")
+            }
+        }
+    }
 
     private func claimOwnershipIfNeeded(_ identity: CallerIdentity) {
         guard owner == nil, let app = identities[.app], identity.signingIdentifier == app.signingIdentifier,
@@ -161,6 +290,21 @@ final class HelperCore {
             try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
         }
         self.config = config
+        var accessLogInitializationError: String?
+        if accessLogStore == nil {
+            do {
+                accessLogStore = AccessLogStore(
+                    fileSystem: try ProtectedAccessLogFileSystem(root: config.configRoot + "/access-logs", ownerUID: 0),
+                    scheduler: DispatchAccessLogScheduler(), clock: Date.init,
+                    makeID: { UUID().uuidString.lowercased() }, writerID: helperSessionID,
+                    budget: accessLogBudget, policy: .default
+                )
+            } catch {
+                accessLogInitializationError = "访问日志目录暂时不可用：\(error.localizedDescription)"
+                Logger(subsystem: "com.lsclpangpang.agentguard", category: "access-log")
+                    .error("访问日志初始化失败：\(String(describing: error), privacy: .public)")
+            }
+        }
         let files = launchFiles(config: config, owner: record), domain = "gui/\(record.uid)"
         launchStatusMonitor = LaunchStatusMonitor { requests in
             LaunchItemController(files: files, domain: domain, fileOwner: 0).statuses(requests)
@@ -173,12 +317,25 @@ final class HelperCore {
             launcherGeneration: (try? CodeSigning.cdhash(atPath: config.helperSettings.launcherPath)).map { String($0.prefix(8)) } ?? "",
             managedLogDirectory: record.home + "/Library/Logs/AgentGuard",
             probe: SystemSandboxProbe(),
-            activity: ActivityStore(root: config.configRoot, files: LocalFileStore())
+            activity: ActivityStore(root: config.configRoot, files: LocalFileStore()),
+            accessLog: accessLogStore, accessLogInitializationError: accessLogInitializationError,
+            helperSessionID: helperSessionID,
+            helperRuntimeCodeHash: helperRuntimeCodeHash, collectorInstallation: collectorInstallation,
+            checkedProcessBirth: { [weak self] process in
+                // The bookkeeping can originate in collector events; require an independent OS
+                // query of this exact process key each time it is used to confirm a checked PID.
+                guard let expected = self?.processBirths[process],
+                      let actual = ProcessFacts.startTime(pid: process.pid), expected == actual else { return nil }
+                return actual
+            }
         )
         service?.onAcknowledgeCollectorProblems = { [weak self] in
             guard let self else { return }
             self.collector.acknowledge()
             self.service?.updateCollectorHealth(self.collector.health())
+        }
+        service?.onAccessLogClearBoundary = { [weak self] in
+            self?.collector.flushPendingForAccessLogClear()
         }
         service?.performProfileDeletion = { [weak self] id, originalLabel, archive in
             guard let self else { throw LaunchItemError.operationFailed }
@@ -204,10 +361,12 @@ final class HelperCore {
 
     private func recordInstance(profileID: String, instance: Int, revision: Int, root: ProcessKey) {
         guard let records = instanceRecords, let startTime = ProcessFacts.startTime(pid: root.pid) else { return }
+        service?.updateInstanceIdentity(instance: instance, bootSessionID: ProcessFacts.bootSessionID, rootStartTime: startTime)
         let snapshot = service?.instances(ofProfile: profileID).first { $0.id == instance }
         processBirths[root] = startTime
         try? records.save(InstanceRecord(instance: instance, profileID: profileID, revision: revision, pid: root.pid, startTime: startTime,
-                                         supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false, bootSessionID: ProcessFacts.bootSessionID))
+                                         supervisedByLaunchd: snapshot?.supervisedByLaunchd ?? false, bootSessionID: ProcessFacts.bootSessionID,
+                                         runUUID: snapshot?.runUUID, instanceOrigin: snapshot?.instanceOrigin))
     }
 
     func reconcileInstances() {
@@ -253,7 +412,15 @@ final class HelperCore {
             }
             let root = ProcessKey(pid: record.pid, version: UInt32(truncatingIfNeeded: record.startTime))
             service.restoreInstance(id: record.instance, profileID: record.profileID, revision: record.revision, root: root,
-                                    supervisedByLaunchd: record.supervisedByLaunchd)
+                                    supervisedByLaunchd: record.supervisedByLaunchd, runUUID: record.runUUID,
+                                    instanceOrigin: record.instanceOrigin, bootSessionID: record.bootSessionID,
+                                    rootStartTime: record.startTime)
+            if let snapshot = service.instances(ofProfile: record.profileID).first(where: { $0.id == record.instance }),
+               record.runUUID != snapshot.runUUID || record.instanceOrigin != snapshot.instanceOrigin {
+                record.runUUID = snapshot.runUUID
+                record.instanceOrigin = snapshot.instanceOrigin
+                try? records.save(record)
+            }
             if ProcessFacts.startTime(pid: record.pid) == record.startTime {
                 processBirths[root] = record.startTime
             } else {
@@ -463,26 +630,24 @@ final class HelperCore {
         operationWarnings += warnings
     }
 
-    /// File events are only collected while some profile is learning; lifecycle events always.
+    /// File collection is independent of protection mode when access logging is enabled.
     private func refreshCollector() {
         guard let config else {
             os_log("refreshCollector: 还没有 owner/config，跳过", log: .default, type: .error)
             return
         }
-        let learning = ((try? config.store.profileIDs()) ?? []).contains { id in
-            (try? config.store.latest(id))?.mode != .enforce
+        let fileEvents = ((try? config.store.profileIDs()) ?? []).contains { id in
+            (try? config.store.latest(id))?.mode != .enforce || service?.accessLogEnabled(id) == true
         }
-        // 文件事件占采集流量的九成以上（实测 open+close ≈ 95%），只有学习模式需要它。
-        // 用标记文件通知采集器，免得为了切订阅把守护进程整条重启。
         let flag = AgentGuardConfig.collectorFileEventsFlagPath
-        if learning {
+        if fileEvents {
             if !FileManager.default.fileExists(atPath: flag) {
                 FileManager.default.createFile(atPath: flag, contents: Data())
             }
         } else {
             try? FileManager.default.removeItem(atPath: flag)
         }
-        collector.start(fileEvents: learning)
+        collector.start(fileEvents: fileEvents)
     }
 }
 

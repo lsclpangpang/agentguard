@@ -298,7 +298,7 @@ struct NewProgramWizard: View {
                 SwiftUI.Toggle(isOn: $recordMore) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("记录更多活动")
-                        Text("未允许的访问仍会被阻止。开启后额外记录成功的文件访问，帮助完善权限；随时可以关闭。").font(.caption).foregroundStyle(.secondary)
+                        Text("未允许的访问仍会被阻止。新版后台默认保存访问日志，可在“最近活动”中独立关闭；此项用于额外采集成功的文件访问，帮助完善权限。").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 DisclosureGroup("推荐权限组") {

@@ -8,8 +8,6 @@ struct ActivityTab: View {
     @EnvironmentObject var model: AppModel
     let profileID: String
     @State private var selected: Set<Suggestion> = []
-    @State private var showRecent = false
-    @State private var expandedAccess: Observation?
 
     private var items: [PendingItem] { model.pending[profileID] ?? [] }
     private var log: ActivityLog? { model.activity[profileID] }
@@ -37,7 +35,7 @@ struct ActivityTab: View {
             }
             archived
             history
-            recent
+            AccessLogHistoryView(profileID: profileID).id(profileID)
         }
         .onAppear { model.loadActivity(profileID) }
         .onChange(of: model.revision) { _, _ in model.loadActivity(profileID) }
@@ -81,7 +79,7 @@ struct ActivityTab: View {
         let list = items.filter(\.isSuggestionOnly)
         if !list.isEmpty {
             Card(title: "权限建议", systemImage: "lightbulb",
-                 subtitle: "这些访问没有被阻止（可能由系统基础规则或旧规则放行），只是当前权限没有明确包含它们。加入权限后会明确列出；不处理也不会改变现在的行为。") {
+                 subtitle: "这些操作曾被观察到允许，当前权限没有明确列出它们。文件打开成功不能证明已读取正文；也可能包含启动器准备阶段的访问。加入权限会明确列出；不处理不会改变现有行为。") {
                 VStack(spacing: 2) {
                     ForEach(list, id: \.self) { item in
                         PendingRow(item: item, selected: binding(item), templates: model.templates) {
@@ -155,40 +153,9 @@ struct ActivityTab: View {
         }
     }
 
-    @ViewBuilder private var recent: some View {
-        if let recent = log?.recent, !recent.isEmpty {
-            let canAllowSystemDNS = model.profile(profileID)?.network.systemDNS != .allowed
-            Card(title: "最近的访问记录", systemImage: "list.bullet.rectangle") {
-                DisclosureGroup(isExpanded: $showRecent) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if recent.contains(where: \.isNetwork) {
-                            Text("网络记录显示系统提供的目标和端口。系统未提供的域名、完整 URL 或协议会明确标注；端口号不能单独证明访问了哪个网站。")
-                                .font(.caption).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true).padding(.bottom, 6)
-                        }
-                        ForEach(Array(recent.prefix(200).enumerated()), id: \.offset) { _, observation in
-                            RecentAccessRow(observation: observation, expanded: Binding(
-                                get: { expandedAccess == observation },
-                                set: { expandedAccess = $0 ? observation : nil }
-                            ), allowSystemDNS: observation.denied && observation.isSystemDNS
-                                && canAllowSystemDNS ? {
-                                    model.acceptAll([PendingItem(suggestion: .systemDNS, sensitive: false,
-                                                                 evidence: observation.count, samples: [SystemDNS.socketPath],
-                                                                 denied: observation.count, firstSeen: observation.at, lastSeen: observation.at)],
-                                                    for: profileID)
-                                } : nil)
-                        }
-                    }
-                    .padding(.top, 6)
-                } label: {
-                    Text("本次 Helper 运行期间记录的 \(recent.count) 条访问。日常正常活动只在这里列出。").font(.callout).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
 }
 
-private struct RecentAccessRow: View {
+struct RecentAccessRow: View {
     let observation: Observation
     @Binding var expanded: Bool
     var allowSystemDNS: (() -> Void)?
@@ -340,8 +307,8 @@ private struct PendingRow<Actions: View>: View {
     }
 
     private var evidence: String {
-        var text = item.wasBlocked ? "被阻止 \(item.denied) 次" : item.refusalKnown ? "成功 \(item.evidence) 次" : "出现 \(item.evidence) 次"
-        if item.wasBlocked && item.evidence > item.denied { text += "，成功 \(item.evidence - item.denied) 次" }
+        var text = item.wasBlocked ? "被阻止 \(item.denied) 次" : item.refusalKnown ? "观察到允许 \(item.evidence) 次" : "出现 \(item.evidence) 次"
+        if item.wasBlocked && item.evidence > item.denied { text += "，观察到允许 \(item.evidence - item.denied) 次" }
         if let last = item.lastSeen { text += " · 最近 \(last.formatted(date: .omitted, time: .shortened))" }
         return text
     }

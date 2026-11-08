@@ -11,8 +11,8 @@ public struct AgentGuardConfig: Sendable {
     public static let collectorLabel = "com.lsclpangpang.agentguard.collector"
     public static let collectorPlistName = "com.lsclpangpang.agentguard.collector.plist"
     public static let collectorSocketPath = "/var/run/com.lsclpangpang.agentguard.collector.sock"
-    /// 文件事件（open/close/…）要占采集流量的九成以上，只有受限学习需要。Helper 在有学习模式
-    /// 配置档时写下这个标记，采集器据此决定要不要订阅，切换后几秒内生效。
+    /// Helper 在有学习模式或启用访问日志的配置档时写下这个标记。
+    /// 采集器据此决定是否订阅文件事件，切换不改变受管程序的保护模式或权限。
     public static let collectorFileEventsFlagPath = "/var/run/com.lsclpangpang.agentguard.collector.file-events"
     public static let privilegedHelperToolsDirectory = "/Library/PrivilegedHelperTools"
     public static let systemLaunchDaemonsDirectory = "/Library/LaunchDaemons"

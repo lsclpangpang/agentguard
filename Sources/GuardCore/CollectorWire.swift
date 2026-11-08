@@ -12,6 +12,10 @@ public enum CollectorEvent: Equatable, Sendable {
     case sandbox(String)
     /// A line from `eslogger`'s stderr, for example a missing Full Disk Access grant.
     case error(String)
+    /// Actual source subscriptions/health from a collector supporting status envelopes.
+    case status(CollectorRuntimeStatus)
+    /// A bounded diagnostic, never a raw machine-wide event backlog.
+    case gap(CollectorInputGap)
 }
 
 public enum CollectorWire {
@@ -26,6 +30,8 @@ public enum CollectorWire {
         case let .eslogger(line): envelope = Envelope(k: "es", v: line)
         case let .sandbox(line): envelope = Envelope(k: "sb", v: line)
         case let .error(line): envelope = Envelope(k: "err", v: line)
+        case let .status(status): envelope = Envelope(k: "status", v: json(status))
+        case let .gap(gap): envelope = Envelope(k: "gap", v: json(gap))
         }
         let encoder = JSONEncoder()
         guard let data = try? encoder.encode(envelope), let text = String(data: data, encoding: .utf8) else {
@@ -42,8 +48,23 @@ public enum CollectorWire {
         case "es": return .eslogger(envelope.v)
         case "sb": return .sandbox(envelope.v)
         case "err": return .error(envelope.v)
+        case "status":
+            guard let value: CollectorRuntimeStatus = value(envelope.v) else { return nil }
+            return .status(value)
+        case "gap":
+            guard let value: CollectorInputGap = value(envelope.v) else { return nil }
+            return .gap(value)
         default: return nil
         }
+    }
+
+    private static func json<T: Encodable>(_ value: T) -> String {
+        guard let data = try? JSONEncoder().encode(value) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func value<T: Decodable>(_ text: String) -> T? {
+        try? JSONDecoder().decode(T.self, from: Data(text.utf8))
     }
 }
 

@@ -47,6 +47,9 @@ enum AgentGuardEntry {
         if arguments.first == "--repair-process-control" {
             exit(await ProcessControlRepairCommand.run(arguments: Array(arguments.dropFirst())))
         }
+        if arguments.first == "--repair-go-build" {
+            exit(await ProcessControlRepairCommand.run(arguments: Array(arguments.dropFirst()), kind: .goBuild))
+        }
         AgentGuardApp.main()
     }
 }

@@ -67,10 +67,15 @@ final class AppModel: ObservableObject {
     }
 
     let config: AgentGuardConfig
+    /// Candidate validated once for this App launch; never inferred from the connected Helper.
+    private let bundledHelperCodeHash: String?
 
     init() {
         let uid = getuid()
         config = AgentGuardConfig(home: UserAccount.home(uid: uid) ?? NSHomeDirectory(), uid: Int(uid), homebrewPrefix: AgentGuardConfig.detectHomebrewPrefix())
+        let directory = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).deletingLastPathComponent().path
+        bundledHelperCodeHash = try? CodeSigning.validatedCDHash(
+            atPath: directory + "/agentguard-helper", expectedIdentifier: AgentGuardConfig.helperServiceName)
     }
 
     var templates: [Template] { config.templates }
@@ -90,14 +95,31 @@ final class AppModel: ObservableObject {
         }
         let health = CollectorHealth(problems: report.collectorProblems.isEmpty ? [] : [.interrupted])
         let status = OverallStatus.evaluate(objects: objects, collector: health, freshness: freshness)
-        guard helperOutdated else { return status }
-        return OverallStatus(level: max(status.level, .attention), reasons: ["后台服务版本较旧，需要更新：在设置中点“检查并修复”"] + status.reasons)
+        var componentReasons: [String] = []
+        switch helperVersionStatus {
+        case .updateRequired: componentReasons.append("后台服务尚未确认使用当前 App 的版本：在设置中点“检查并修复”")
+        case .identityUnavailable: componentReasons.append("无法核对 App 内后台组件，请检查 App 是否安装完整")
+        case .current, nil: break
+        }
+        if let notice = collectorInstallationNotice { componentReasons.append(notice) }
+        guard !componentReasons.isEmpty else { return status }
+        return OverallStatus(level: max(status.level, .attention), reasons: componentReasons + status.reasons)
     }
 
-    /// The Helper answered but speaks an older protocol: the App was updated, the Helper was not.
+    var helperVersionStatus: ComponentVersionStatus? {
+        guard helperReachable, let report else { return nil }
+        return ComponentVersionStatus.helper(protocolVersion: report.helperProtocol, requiredProtocol: HelperProtocol.version,
+                                             runtimeCodeHash: report.helperRuntimeCodeHash, bundledCodeHash: bundledHelperCodeHash)
+    }
+
+    /// Protocol compatibility alone does not prove that the running Helper contains this App's fixes.
     var helperOutdated: Bool {
-        guard helperReachable, let report else { return false }
-        return report.helperProtocol < HelperProtocol.version
+        helperVersionStatus == .updateRequired
+    }
+
+    var collectorInstallationNotice: String? {
+        guard let installation = report?.collectorInstallation, installation.requiresMaintenance else { return nil }
+        return installation.description
     }
 
     var freshness: StatusFreshness { StatusFreshness.evaluate(confirmedAt: statusConfirmedAt, now: Date()) }
@@ -146,7 +168,7 @@ final class AppModel: ObservableObject {
             self.report = report
             helperReachable = true
             statusConfirmedAt = Date()
-            if report.helperProtocol >= HelperProtocol.version { installNotice = nil }
+            if helperVersionStatus == .current { installNotice = nil }
         } else {
             // Preserve the last report during a failed query so the selected detail is not rebuilt.
             helperReachable = false
@@ -172,6 +194,10 @@ final class AppModel: ObservableObject {
 
     func installHelper() {
         guard !uninstalling else { return }
+        guard bundledHelperCodeHash != nil else {
+            lastError = "无法核对 App 内后台组件的签名；请重新安装完整的 AgentGuard 后再修复"
+            return
+        }
         suspendHelperMaintenance()
         helperMaintenance.resume()
         UserDefaults.standard.set(false, forKey: "helperRemovedByUser")
@@ -200,7 +226,8 @@ final class AppModel: ObservableObject {
     /// ad-hoc re-signed build leaves a job that launchd can never spawn. Registering again once per
     /// launch is what makes a rebuilt app work without a trip to System Settings.
     private func repairStaleRegistrationIfNeeded() {
-        guard helperMaintenance.enabled, !didAttemptRegistrationRepair, registrationRepairTask == nil else { return }
+        guard helperMaintenance.enabled, bundledHelperCodeHash != nil,
+              !didAttemptRegistrationRepair, registrationRepairTask == nil else { return }
         let service = SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName)
         guard HelperInstallRepair.action(status: Self.installStatus(service.status), reachable: helperReachable) != .none else {
             return
@@ -282,12 +309,20 @@ final class AppModel: ObservableObject {
                 guard !Task.isCancelled, helperMaintenance.enabled else { return }
                 _ = await refreshReport(timeout: 2, includePending: false)
                 guard !Task.isCancelled, helperMaintenance.enabled else { return }
-                if helperReachable && !helperOutdated { startAutoRefresh(); return }
+                if helperVersionStatus == .current { startAutoRefresh(); return }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
             guard !Task.isCancelled, helperMaintenance.enabled else { return }
-            installNotice = helperOutdated ? "后台服务仍是旧版本，更新尚未确认。请检查后台项目的系统授权后重试。"
-                                          : "尚未连接到后台服务，请检查后台项目的系统授权。"
+            switch helperVersionStatus {
+            case .updateRequired:
+                installNotice = "后台服务仍未确认使用当前 App 的版本。请检查后台项目的系统授权后重试。"
+            case .identityUnavailable:
+                installNotice = "无法核对 App 内后台组件的签名，请检查 App 是否安装完整。"
+            case .current:
+                installNotice = nil
+            case nil:
+                installNotice = "尚未连接到后台服务，请检查后台项目的系统授权。"
+            }
             startAutoRefresh()
         }
     }

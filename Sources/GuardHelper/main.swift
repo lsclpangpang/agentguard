@@ -1,6 +1,7 @@
 import Foundation
 
 #if os(macOS)
+import Darwin
 import GuardCore
 import GuardPlatform
 
@@ -16,7 +17,7 @@ final class HelperSession: NSObject, AgentGuardHelperXPC {
     }
 
     func handle(_ request: Data, withReply reply: @escaping (Data) -> Void) {
-        core.queue.async { reply(self.core.handle(request, identity: self.identity, process: self.process)) }
+        core.handle(request, identity: identity, process: process, reply: reply)
     }
 }
 
@@ -48,14 +49,22 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
 // Both when Bundle.main resolves to AgentGuard.app and when it does not, the executable's
 // directory is Contents/MacOS, where the binaries we trust live.
 let macOSDirectory = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).deletingLastPathComponent().path
-let core = HelperCore(bundleMacOSDirectory: macOSDirectory)
+let runtimeCodeHash = try? CodeSigning.runningCDHash()
+let core = HelperCore(bundleMacOSDirectory: macOSDirectory, runtimeCodeHash: runtimeCodeHash)
 UserAuthorization.ensureRightDefinition()
 let delegate = ListenerDelegate(core: core)
 let listener = NSXPCListener(machServiceName: AgentGuardConfig.helperServiceName)
 listener.delegate = delegate
 listener.resume()
 core.start()
-RunLoop.main.run()
+let shutdownSignals = [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
+    signal(number, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: number, queue: .global(qos: .utility))
+    source.setEventHandler { core.shutdown { exit(0) } }
+    source.resume()
+    return source
+}
+withExtendedLifetime(shutdownSignals) { RunLoop.main.run() }
 #else
 FileHandle.standardError.write(Data("agentguard-helper 只能在 macOS 上运行\n".utf8))
 exit(1)

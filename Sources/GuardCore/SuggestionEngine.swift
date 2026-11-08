@@ -11,6 +11,14 @@ public enum ObservedAccess: Hashable, Sendable, Codable {
     case signal(target: String)
 }
 
+/// Frozen at intake. A later logging toggle or a writer high-water mark cannot prove that a
+/// particular memory-only/rejected observation was saved.
+public enum AccessLogDisposition: String, Hashable, Codable, Sendable {
+    case queued
+    case memoryOnly = "memory_only"
+    case rejected
+}
+
 public struct Observation: Hashable, Sendable, Codable {
     public var instance: Int?
     public var access: ObservedAccess
@@ -23,9 +31,17 @@ public struct Observation: Hashable, Sendable, Codable {
     public var networkTarget: String?
     public var processName: String?
     public var pid: Int32?
+    /// Identity shared with the persisted record; optional when logging is disabled or older Helpers
+    /// supplied the observation. Writer identity prevents sequence reuse across Helper restarts.
+    public var eventID: String?
+    public var accessLogSequence: UInt64?
+    public var accessLogWriterID: String?
+    public var accessLogDisposition: AccessLogDisposition?
 
     public init(instance: Int?, access: ObservedAccess, denied: Bool, count: Int = 1, at: Date? = nil,
-                networkTarget: String? = nil, processName: String? = nil, pid: Int32? = nil) {
+                networkTarget: String? = nil, processName: String? = nil, pid: Int32? = nil,
+                eventID: String? = nil, accessLogSequence: UInt64? = nil, accessLogWriterID: String? = nil,
+                accessLogDisposition: AccessLogDisposition? = nil) {
         self.instance = instance
         self.access = access
         self.denied = denied
@@ -34,6 +50,10 @@ public struct Observation: Hashable, Sendable, Codable {
         self.networkTarget = networkTarget
         self.processName = processName
         self.pid = pid
+        self.eventID = eventID
+        self.accessLogSequence = accessLogSequence
+        self.accessLogWriterID = accessLogWriterID
+        self.accessLogDisposition = accessLogDisposition
     }
 }
 

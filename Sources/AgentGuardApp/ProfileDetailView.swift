@@ -406,7 +406,7 @@ private struct RecordMoreCard: View {
             SwiftUI.Toggle(isOn: Binding(get: { profile.mode == .restrictedLearning }, set: { model.setRecordsMoreActivity($0, in: profile.id) })) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("记录程序成功完成的文件访问，帮助完善权限")
-                    Text("未允许的访问仍会被阻止。开启后会记录这个程序的文件打开、创建和删除，只用于本机的权限建议；关闭后停止记录。根据这些记录给出的建议不代表程序的全部需求。")
+                    Text("开启后采集成功的文件访问，帮助完善权限。关闭此项时，如果“最近活动”里的“保存访问日志”仍开启，文件访问会继续记录。未允许的访问仍会被阻止；建议只反映实际收到的事件。")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
