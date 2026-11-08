@@ -49,6 +49,12 @@ public enum HelperRequest: Codable, Equatable, Sendable {
     case restoreLaunchItem(label: String, authorization: Data?)
     case decide(profileID: String, suggestion: Suggestion, decision: SuggestionDecision)
     case activity(profileID: String)
+    case accessLogStatus(profileID: String?)
+    case queryAccessLog(AccessLogQuery)
+    case exportAccessLogPage(query: AccessLogQuery, byteLimit: Int)
+    case clearAccessLog(profileID: String, expectedGeneration: UInt64)
+    /// Separate from permission revisions; this changes collection, never what the program may do.
+    case setAccessLogEnabled(profileID: String, enabled: Bool)
     /// Stops every managed program and removes AgentGuard's launch items and collector. Profiles,
     /// backups and the programs' working data are kept.
     case uninstall(restoreOriginals: Bool, authorization: Data?)
@@ -56,7 +62,7 @@ public enum HelperRequest: Codable, Equatable, Sendable {
 
 /// Bumped whenever the App and the Helper must be updated together; the App compares it with its own.
 public enum HelperProtocol {
-    public static let version = 3
+    public static let version = 9
 }
 
 public struct PendingChangeInfo: Codable, Equatable, Sendable {
@@ -77,6 +83,46 @@ public struct PendingChangeInfo: Codable, Equatable, Sendable {
     }
 }
 
+/// The currently known processes of one instance, independent of missing lifecycle history.
+public struct RuntimeInstanceReport: Codable, Equatable, Sendable {
+    public var id: Int
+    public var revision: Int
+    public var entryPID: Int32?
+    public var knownPIDs: [Int32]
+    /// The representative process queried by the most recent sandbox check.
+    public var checkedPID: Int32?
+    public var verified: Bool?
+    /// Full OS birth time, independently matched to this exact process before and after the
+    /// sandbox check. Nil for older Helpers or when that identity could not be established.
+    public var checkedProcessStartTime: UInt64?
+
+    public init(id: Int, revision: Int, entryPID: Int32?, knownPIDs: [Int32], checkedPID: Int32?,
+                verified: Bool?, checkedProcessStartTime: UInt64? = nil) {
+        self.id = id
+        self.revision = revision
+        self.entryPID = entryPID
+        self.knownPIDs = knownPIDs
+        self.checkedPID = checkedPID
+        self.verified = verified
+        self.checkedProcessStartTime = checkedProcessStartTime
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, revision, entryPID, knownPIDs, checkedPID, verified, checkedProcessStartTime
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        revision = try c.decode(Int.self, forKey: .revision)
+        entryPID = try c.decodeIfPresent(Int32.self, forKey: .entryPID)
+        knownPIDs = try c.decode([Int32].self, forKey: .knownPIDs)
+        checkedPID = try c.decodeIfPresent(Int32.self, forKey: .checkedPID)
+        verified = try c.decodeIfPresent(Bool.self, forKey: .verified)
+        checkedProcessStartTime = try c.decodeIfPresent(UInt64.self, forKey: .checkedProcessStartTime)
+    }
+}
+
 public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var profileID: String
     public var savedRevision: Int
@@ -92,12 +138,24 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
     public var launchAgent: LaunchAgentStatus?
     /// Why the running instances did not pass the Helper's sandbox check; empty when they did or it has not run yet.
     public var verificationIssues: [String]
-    /// Running instances whose process tree is not fully known; see `InstanceSnapshot.trackingIncomplete`.
+    /// Checks without a verdict, e.g. a temporary file that does not currently exist.
+    public var verificationPending: [String]
+    /// Absent positive-only grants; their availability is checked after the path appears.
+    public var verificationDeferred: [String]
+    /// Includes historical instances with no known processes left.
     public var untrackedInstances: [Int]
+    /// Only known running instances. Must not be used to claim complete revocation.
+    public var runtimeRevisionState: RevisionState?
+    public var runtimeInstances: [RuntimeInstanceReport]
+
+    public var historicalTrackingGaps: [Int] { untrackedInstances.filter { !runningInstances.contains($0) } }
+    public var activeTrackingGaps: [Int] { untrackedInstances.filter { runningInstances.contains($0) } }
 
     public init(profileID: String, savedRevision: Int, mode: Mode, revisionState: RevisionState, runningInstances: [Int], pendingCount: Int,
                 detachedInstances: [Int] = [], unmanagedProcesses: [Int32] = [], launchAgent: LaunchAgentStatus? = nil,
-                verificationIssues: [String] = [], untrackedInstances: [Int] = []) {
+                verificationIssues: [String] = [], untrackedInstances: [Int] = [], verificationPending: [String] = [],
+                verificationDeferred: [String] = [], runtimeRevisionState: RevisionState? = nil,
+                runtimeInstances: [RuntimeInstanceReport] = []) {
         self.profileID = profileID
         self.savedRevision = savedRevision
         self.mode = mode
@@ -108,12 +166,17 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         self.unmanagedProcesses = unmanagedProcesses
         self.launchAgent = launchAgent
         self.verificationIssues = verificationIssues
+        self.verificationPending = verificationPending
         self.untrackedInstances = untrackedInstances
+        self.verificationDeferred = verificationDeferred
+        self.runtimeRevisionState = runtimeRevisionState
+        self.runtimeInstances = runtimeInstances
     }
 
     enum CodingKeys: String, CodingKey {
         case profileID, savedRevision, mode, revisionState, runningInstances, pendingCount, detachedInstances, unmanagedProcesses, launchAgent
-        case verificationIssues, untrackedInstances
+        case verificationIssues, untrackedInstances, verificationPending
+        case verificationDeferred, runtimeRevisionState, runtimeInstances
     }
 
     /// The app and the helper are updated separately; a report from an older helper has no `detachedInstances`.
@@ -129,7 +192,11 @@ public struct ProfileStatusReport: Codable, Equatable, Sendable {
         unmanagedProcesses = try c.decodeIfPresent([Int32].self, forKey: .unmanagedProcesses) ?? []
         launchAgent = try c.decodeIfPresent(LaunchAgentStatus.self, forKey: .launchAgent)
         verificationIssues = try c.decodeIfPresent([String].self, forKey: .verificationIssues) ?? []
+        verificationPending = try c.decodeIfPresent([String].self, forKey: .verificationPending) ?? []
         untrackedInstances = try c.decodeIfPresent([Int].self, forKey: .untrackedInstances) ?? []
+        verificationDeferred = try c.decodeIfPresent([String].self, forKey: .verificationDeferred) ?? []
+        runtimeRevisionState = try c.decodeIfPresent(RevisionState.self, forKey: .runtimeRevisionState)
+        runtimeInstances = try c.decodeIfPresent([RuntimeInstanceReport].self, forKey: .runtimeInstances) ?? []
     }
 }
 
@@ -139,20 +206,31 @@ public struct StatusReport: Codable, Equatable, Sendable {
     public var collectorProblems: [String]
     /// `HelperProtocol.version` of the Helper that answered; 0 for one that predates it.
     public var helperProtocol: Int
+    /// Code identity frozen from the actual running Helper at startup; never a later disk lookup.
+    public var helperRuntimeCodeHash: String?
+    /// Startup installation decision only. Does not certify the collector's live version/readiness.
+    public var collectorInstallation: CollectorInstallationStatus?
 
-    public init(profiles: [ProfileStatusReport], collectorProblems: [String], helperProtocol: Int = HelperProtocol.version) {
+    public init(profiles: [ProfileStatusReport], collectorProblems: [String], helperProtocol: Int = HelperProtocol.version,
+                helperRuntimeCodeHash: String? = nil, collectorInstallation: CollectorInstallationStatus? = nil) {
         self.profiles = profiles
         self.collectorProblems = collectorProblems
         self.helperProtocol = helperProtocol
+        self.helperRuntimeCodeHash = helperRuntimeCodeHash
+        self.collectorInstallation = collectorInstallation
     }
 
-    enum CodingKeys: String, CodingKey { case profiles, collectorProblems, helperProtocol }
+    enum CodingKeys: String, CodingKey {
+        case profiles, collectorProblems, helperProtocol, helperRuntimeCodeHash, collectorInstallation
+    }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         profiles = try c.decode([ProfileStatusReport].self, forKey: .profiles)
         collectorProblems = try c.decode([String].self, forKey: .collectorProblems)
         helperProtocol = try c.decodeIfPresent(Int.self, forKey: .helperProtocol) ?? 0
+        helperRuntimeCodeHash = try c.decodeIfPresent(String.self, forKey: .helperRuntimeCodeHash)
+        collectorInstallation = try c.decodeIfPresent(CollectorInstallationStatus.self, forKey: .collectorInstallation)
     }
 }
 
@@ -197,20 +275,24 @@ public enum HelperResponse: Codable, Equatable, Sendable {
     case disableLaunchItem(profileID: String, label: String, path: String)
     case restoreLaunchItem(label: String)
     case activity(ActivityLog)
+    case accessLogStatus(AccessLogStatus)
+    case accessLogPage(AccessLogPage)
+    case accessLogExportPage(AccessLogExportPage)
+    case accessLogCleared(profileID: String, result: AccessLogClearResult)
     case uninstall(targets: [UninstallTarget])
 }
 
 public enum HelperWire {
     static func encoder() -> JSONEncoder {
         let e = JSONEncoder()
-        e.dateEncodingStrategy = .iso8601
+        e.dateEncodingStrategy = AccessLogTimestamp.encodingStrategy
         e.outputFormatting = [.sortedKeys]
         return e
     }
 
     static func decoder() -> JSONDecoder {
         let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
+        d.dateDecodingStrategy = AccessLogTimestamp.decodingStrategy
         return d
     }
 
@@ -246,12 +328,28 @@ public final class HelperService {
     /// Set only by the Helper's own sandbox check of the running process, never by the process.
     private var verified: [Int: Bool] = [:]
     private var verificationIssues: [Int: [String]] = [:]
+    private var verificationPending: [Int: [String]] = [:]
+    private var verificationDeferred: [Int: [String]] = [:]
+    private var checkedPID: [Int: Int32] = [:]
+    private var checkedProcessStartTime: [Int: UInt64] = [:]
+    private var checkedAt: [Int: Date] = [:]
+    public static let verificationRetryInterval: TimeInterval = 5
     private var registeredAt: [Int: Date] = [:]
     /// What each instance must look like, fixed when its rules were handed out: a later app update
     /// that changes templates must not change what an already running process is checked against.
     private var expectations: [Int: [SandboxExpectation]] = [:]
     private let probe: (any SandboxProbe)?
+    private let checkedProcessBirth: ((ProcessKey) -> UInt64?)?
     private let activity: ActivityStore?
+    private let accessLog: AccessLogStore?
+    private let accessLogInitializationError: String?
+    private let accessLogSettings: AccessLogSettingStore
+    private let helperSessionID: String
+    private let helperRuntimeCodeHash: String?
+    private var collectorInstallation: CollectorInstallationStatus?
+    private let makeRunID: () -> String
+    private var fileEventsSubscribed: Bool?
+    private var accessLogEnabledCache: [String: Bool] = [:]
     private let login: LoginSettingStore
     /// How long a registered process may take to apply its sandbox before it counts as unprotected.
     public static let sandboxGracePeriod: TimeInterval = 15
@@ -263,16 +361,31 @@ public final class HelperService {
     private static let observationLimit = 5000
     /// Set by the platform layer, which owns the collector's health monitor.
     public var onAcknowledgeCollectorProblems: (() -> Void)?
+    /// A finite FIFO ingress checkpoint, drained on the state queue before the writer clear barrier.
+    /// The platform captures its bounded collector inbox; later arrivals do not extend this drain.
+    public var onAccessLogClearBoundary: (() -> Void)?
     /// The platform wraps archival in startup cleanup/rollback, after trust and authorization.
     public var performProfileDeletion: ((_ id: String, _ restoreOriginalLabel: String?, _ archive: () throws -> Void) throws -> Void)?
 
     public init(store: ProfileStore, environment: CompileEnvironment, catalog: TemplateCatalog, trust: CallerTrustPolicy,
                 verifier: any AuthorizationVerifier, settings: HelperSettings, clock: @escaping () -> Date, makeID: @escaping () -> String,
                 launcherGeneration: String = "", managedLogDirectory: String = "", probe: (any SandboxProbe)? = nil,
-                activity: ActivityStore? = nil) {
+                activity: ActivityStore? = nil, accessLog: AccessLogStore? = nil,
+                accessLogInitializationError: String? = nil, accessLogSettings: AccessLogSettingStore? = nil,
+                helperSessionID: String = UUID().uuidString, makeRunID: @escaping () -> String = { UUID().uuidString },
+                helperRuntimeCodeHash: String? = nil, collectorInstallation: CollectorInstallationStatus? = nil,
+                checkedProcessBirth: ((ProcessKey) -> UInt64?)? = nil) {
         self.store = store
         self.probe = probe
+        self.checkedProcessBirth = checkedProcessBirth
         self.activity = activity
+        self.accessLog = accessLog
+        self.accessLogInitializationError = accessLogInitializationError
+        self.accessLogSettings = accessLogSettings ?? AccessLogSettingStore(root: store.root, files: activity?.files ?? InMemoryFileStore())
+        self.helperSessionID = helperSessionID
+        self.helperRuntimeCodeHash = helperRuntimeCodeHash
+        self.collectorInstallation = collectorInstallation
+        self.makeRunID = makeRunID
         self.login = LoginSettingStore(root: store.root, files: activity?.files ?? InMemoryFileStore())
         self.environment = environment
         self.compiler = PolicyCompiler(environment: environment)
@@ -297,19 +410,32 @@ public final class HelperService {
 
     /// The sandbox is checked again rather than restored: the process is still running, so the
     /// check can simply be repeated, and nothing written earlier has to be trusted.
-    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool) {
+    public func restoreInstance(id: Int, profileID: String, revision: Int, root: ProcessKey, supervisedByLaunchd: Bool,
+                                runUUID: String? = nil, instanceOrigin: String? = nil,
+                                bootSessionID: String? = nil, rootStartTime: UInt64? = nil) {
         tracker.register(instance: id, profileID: profileID, revision: revision, root: root,
-                         supervisedByLaunchd: supervisedByLaunchd, restored: true)
+                         supervisedByLaunchd: supervisedByLaunchd, restored: true, runUUID: runUUID ?? makeRunID(),
+                         instanceOrigin: instanceOrigin ?? "legacy-restored:" + helperSessionID,
+                         bootSessionID: bootSessionID, rootStartTime: rootStartTime)
         verified.removeValue(forKey: id)
         verificationIssues.removeValue(forKey: id)
+        verificationPending.removeValue(forKey: id)
+        verificationDeferred.removeValue(forKey: id)
+        checkedPID.removeValue(forKey: id)
+        checkedProcessStartTime.removeValue(forKey: id)
+        checkedAt.removeValue(forKey: id)
         registeredAt.removeValue(forKey: id)
         expectations.removeValue(forKey: id)
         // Numbering restarts with the Helper; a new instance must never take a restored one's number.
         nextInstance = max(nextInstance, id + 1)
     }
 
-    /// Checks every running instance that has no verdict yet. Called on a timer and before each
-    /// status report, so a fresh start is confirmed as soon as its sandbox is in place.
+    public func updateInstanceIdentity(instance: Int, bootSessionID: String?, rootStartTime: UInt64?) {
+        tracker.updateIdentity(instance: instance, bootSessionID: bootSessionID, rootStartTime: rootStartTime)
+    }
+
+    /// Rechecks running instances periodically: paths and system restrictions can change while
+    /// a process runs. A stale failure or success must not remain the final verdict forever.
     public func verifyInstances() {
         guard let probe, let ids = try? store.profileIDs() else { return }
         let now = clock()
@@ -317,14 +443,24 @@ public final class HelperService {
             // An exited instance's verdict is never read again (revision state looks only at running ones).
             for snapshot in tracker.instances(ofProfile: profileID) where !snapshot.isRunning {
                 if registeredAt[snapshot.id] != nil || verified[snapshot.id] != nil || expectations[snapshot.id] != nil {
-                    log(profileID, .stopped, "运行副本 #\(snapshot.id) 已退出")
+                    log(profileID, .stopped, snapshot.trackingIncomplete
+                        ? "副本 #\(snapshot.id) 的已跟踪进程已退出" : "运行副本 #\(snapshot.id) 已退出",
+                        snapshot.trackingIncomplete ? ["此前的子进程记录不完整，不能据此确认所有子进程都已退出。"] : [])
                 }
                 verified.removeValue(forKey: snapshot.id)
                 verificationIssues.removeValue(forKey: snapshot.id)
+                verificationPending.removeValue(forKey: snapshot.id)
+                verificationDeferred.removeValue(forKey: snapshot.id)
+                checkedPID.removeValue(forKey: snapshot.id)
+                checkedProcessStartTime.removeValue(forKey: snapshot.id)
+                checkedAt.removeValue(forKey: snapshot.id)
                 registeredAt.removeValue(forKey: snapshot.id)
                 expectations.removeValue(forKey: snapshot.id)
             }
-            for snapshot in tracker.instances(ofProfile: profileID) where snapshot.isRunning && verified[snapshot.id] == nil {
+            for snapshot in tracker.instances(ofProfile: profileID) where snapshot.isRunning {
+                if let checked = checkedAt[snapshot.id], now.timeIntervalSince(checked) < Self.verificationRetryInterval { continue }
+                let previous = verified[snapshot.id]
+                let previousIssues = verificationIssues[snapshot.id]
                 // A restored instance's rules were handed out by an earlier Helper; recompiling its revision is the best evidence left.
                 if expectations[snapshot.id] == nil, let profile = try? store.revision(profileID, snapshot.revision),
                    let policy = try? compiler.compile(profile, catalog: catalog) {
@@ -335,24 +471,59 @@ public final class HelperService {
                     continue
                 }
                 // Every process of an instance inherits the sandbox its root applied before exec.
-                guard let pid = (snapshot.entry ?? snapshot.liveProcesses.min())?.pid else { continue }
-                switch SandboxVerification.verify(pid: pid, expectations: expected, probe: probe) {
-                case .passed:
+                guard let process = snapshot.entry ?? snapshot.liveProcesses.min() else { continue }
+                let pid = process.pid
+                checkedAt[snapshot.id] = now
+                checkedPID[snapshot.id] = pid
+                checkedProcessStartTime.removeValue(forKey: snapshot.id)
+                verificationDeferred.removeValue(forKey: snapshot.id)
+                let birthBefore = checkedProcessBirth?(process)
+                let verdict = SandboxVerification.verify(pid: pid, expectations: expected, probe: probe)
+                if let birthBefore, birthBefore == checkedProcessBirth?(process) {
+                    checkedProcessStartTime[snapshot.id] = birthBefore
+                }
+                switch verdict {
+                case .passed, .passedWithDeferred:
                     verified[snapshot.id] = true
                     verificationIssues.removeValue(forKey: snapshot.id)
-                    log(profileID, .verified, "运行副本 #\(snapshot.id) 的保护已确认", ["使用修订 \(snapshot.revision) 的权限"])
+                    verificationPending.removeValue(forKey: snapshot.id)
+                    if case let .passedWithDeferred(paths) = verdict { verificationDeferred[snapshot.id] = paths }
+                    if previous != true {
+                        var details = ["使用修订 \(snapshot.revision) 的权限；核验进程 PID \(pid)"]
+                        if let paths = verificationDeferred[snapshot.id] {
+                            details.append("以下授权路径尚未出现，出现后自动补查：" + paths.joined(separator: "、"))
+                        }
+                        log(profileID, .verified, "运行副本 #\(snapshot.id) 的可用权限检查已通过", details)
+                    }
                 case let .failed(issues):
                     fail(snapshot.id, issues)
-                    log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有通过保护确认", issues)
+                    if previous != false || previousIssues != issues {
+                        log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有通过保护确认", issues)
+                    }
+                case let .inconclusive(reasons):
+                    verified.removeValue(forKey: snapshot.id)
+                    verificationIssues.removeValue(forKey: snapshot.id)
+                    verificationPending[snapshot.id] = reasons
                 case .notSandboxed:
                     // A restored instance has been running for a while; it gets no grace period.
                     let deadline = registeredAt[snapshot.id].map { $0.addingTimeInterval(Self.sandboxGracePeriod) } ?? now
                     if now >= deadline {
-                        fail(snapshot.id, ["进程没有进入沙箱，它不受这份权限限制"])
-                        log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有进入沙箱")
+                        let issues = ["进程没有进入沙箱，它不受这份权限限制"]
+                        fail(snapshot.id, issues)
+                        if previous != false || previousIssues != issues {
+                            log(profileID, .verificationFailed, "运行副本 #\(snapshot.id) 没有进入沙箱")
+                        }
+                    } else {
+                        verified.removeValue(forKey: snapshot.id)
+                        verificationIssues.removeValue(forKey: snapshot.id)
+                        verificationPending.removeValue(forKey: snapshot.id)
+                        // Do not delay the first confirmation while the launcher enters its sandbox.
+                        checkedAt.removeValue(forKey: snapshot.id)
                     }
                 case .unavailable:
-                    break
+                    verified.removeValue(forKey: snapshot.id)
+                    verificationIssues.removeValue(forKey: snapshot.id)
+                    verificationPending[snapshot.id] = ["系统暂时无法查询运行进程的保护状态"]
                 }
             }
         }
@@ -370,6 +541,8 @@ public final class HelperService {
     private func fail(_ instance: Int, _ issues: [String]) {
         verified[instance] = false
         verificationIssues[instance] = issues
+        verificationPending.removeValue(forKey: instance)
+        verificationDeferred.removeValue(forKey: instance)
     }
 
     public func updateIdentities(_ identities: [CallerRole: CodeIdentity]) {
@@ -390,35 +563,196 @@ public final class HelperService {
         tracker.owner(of: process)
     }
 
+    /// The platform calls this before its birth bookkeeping; observe also calls it for standalone
+    /// Core users. Recovery needs an exact event birth matching an independently validated process.
+    public func resolveObservedProcess(_ process: ProcessKey, startTime: UInt64?, expectedInstance: Int? = nil)
+        -> (instance: Int, previousKey: ProcessKey?)? {
+        tracker.resolveObservedProcess(process, startTime: startTime, expectedInstance: expectedInstance)
+    }
+
     /// The latest scan of running processes, used to report programs started outside AgentGuard.
     public func updateRunningProcesses(_ processes: [RunningProcess]) {
         runningProcesses = processes
     }
 
     public func updateCollectorHealth(_ health: CollectorHealth) {
+        let changed = collectorHealth.problems != health.problems
         collectorHealth = health
+        fileEventsSubscribed = health.coverage.fileEventsSubscribed
+        if changed {
+            recordAccessLogGap(reason: health.isHealthy ? "collector_recovered" : "collector_health_changed",
+                               isRecovery: health.isHealthy)
+        }
+    }
+
+    public func updateCollectorInstallation(_ status: CollectorInstallationStatus) {
+        collectorInstallation = status
+    }
+
+    /// Actual subscription acknowledgement; a healthy legacy collector alone proves no file coverage.
+    public func updateAccessLogCoverage(fileEventsSubscribed: Bool?) {
+        self.fileEventsSubscribed = fileEventsSubscribed
+    }
+
+    public func accessLogEnabled(_ profileID: String) -> Bool {
+        if let enabled = accessLogEnabledCache[profileID] { return enabled }
+        let enabled = accessLogSettings.isEnabled(profileID)
+        accessLogEnabledCache[profileID] = enabled
+        return enabled
+    }
+
+    public func recordAccessLogGap(reason: String, droppedCount: UInt64? = nil, at: Date? = nil,
+                                   firstSequence: UInt64? = nil, lastSequence: UInt64? = nil,
+                                   from: Date? = nil, through: Date? = nil) {
+        recordAccessLogGap(reason: reason, droppedCount: droppedCount, at: at, firstSequence: firstSequence,
+                           lastSequence: lastSequence, from: from, through: through, isRecovery: false)
+    }
+
+    private func recordAccessLogGap(reason: String, droppedCount: UInt64? = nil, at: Date? = nil,
+                                    firstSequence: UInt64? = nil, lastSequence: UInt64? = nil,
+                                    from: Date? = nil, through: Date? = nil, isRecovery: Bool) {
+        guard let accessLog, let ids = try? store.profileIDs() else { return }
+        for profileID in ids where accessLogEnabled(profileID) {
+            var record = AccessLogRecord(profileID: profileID, operation: reason, outcome: .unknown,
+                                         receivedAt: at ?? clock(), source: .collector,
+                                         coverage: currentAccessLogCoverage(profileID: profileID), attributionStatus: .incomplete)
+            record.kind = isRecovery ? .storageStatus : .gap
+            record.evidence = collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description).joined(separator: "; ")
+            if !isRecovery {
+                record.gap = AccessLogGap(reason: reason, droppedCount: droppedCount, firstSequence: firstSequence,
+                                         lastSequence: lastSequence, from: from ?? at, through: through ?? at)
+            }
+            _ = accessLog.append(record)
+        }
     }
 
     /// One eslogger event: lifecycle goes to the tracker, accesses of managed processes are recorded.
     public func observe(line: ESLine) {
-        let instance = tracker.owner(of: line.process)
-        if let event = line.processEvent { tracker.handle(event) }
-        guard let instance else { return }
-        for access in line.observedAccesses { record(Observation(instance: instance, access: access, denied: false, at: clock()), instance: instance) }
+        let snapshot = resolveObservedProcess(line.process, startTime: line.processStartTime)
+            .flatMap { tracker.snapshot(of: $0.instance) }
+        let receivedAt = line.receivedAt ?? clock()
+        // Freeze attribution before exec or exit changes the tracking keys.
+        var receipts: [(result: AccessLogAppendResult, disposition: AccessLogDisposition)] = []
+        if let snapshot {
+            for (index, target) in line.rawTargets.enumerated() {
+                let outcome: AccessLogOutcome
+                if case .unsupported = line.kind { outcome = .unknown } else { outcome = .allowedObserved }
+                var record = accessRecord(snapshot: snapshot, operation: line.rawOperation, outcome: outcome,
+                                          receivedAt: receivedAt, source: .eslogger,
+                                          target: target, attribution: snapshot.trackingIncomplete ? .incomplete : .confirmed)
+                record.pid = line.process.pid
+                record.pidversion = line.process.version
+                record.processStartTime = line.processStartTime
+                record.openFlags = line.openFlags
+                record.executablePath = line.executablePath
+                record.sourceSequence = line.globalSequence
+                record.sourceAt = line.sourceAt
+                record.sourceEventID = line.sourceEventID
+                record.sourceSubsequence = index
+                record.evidence = esEvidence(line.kind)
+                receipts.append(appendAccessRecord(record))
+            }
+        }
+        if let snapshot, let event = line.processEvent {
+            if case let .fork(_, child) = event {
+                _ = tracker.resolveObservedProcess(child, startTime: line.relatedProcessStartTime,
+                    expectedInstance: snapshot.id)
+            }
+            tracker.handle(event)
+        }
+        guard let snapshot else { return }
+        for (index, access) in line.observedAccesses.enumerated() {
+            let receipt = index < receipts.count ? receipts[index] : nil
+            record(Observation(instance: snapshot.id, access: access, denied: false, at: receivedAt,
+                               pid: line.process.pid, eventID: receipt?.result.eventID, accessLogSequence: receipt?.result.sequence,
+                               accessLogWriterID: receipt?.result.writerID,
+                               accessLogDisposition: receipt?.disposition), instance: snapshot.id)
+        }
     }
 
     /// One sandbox denial from the unified log; only denials of managed processes are kept.
     public func observe(denial: SandboxDenial) {
-        guard let access = denial.access, let instance = tracker.owner(ofPID: denial.pid) else { return }
-        record(Observation(instance: instance, access: access, denied: true, at: clock()), instance: instance)
+        guard let instance = tracker.owner(ofPID: denial.pid), let snapshot = tracker.snapshot(of: instance) else { return }
+        let receivedAt = denial.receivedAt ?? clock()
+        var event = accessRecord(snapshot: snapshot, operation: denial.operation, outcome: .denied,
+                                 receivedAt: receivedAt, source: .sandboxLog,
+                                 target: denial.target, attribution: .pidOnly)
+        event.pid = denial.pid
+        event.processName = denial.process
+        event.sourceSequence = denial.sourceSequence
+        event.sourceAt = denial.sourceAt
+        event.sourceEventID = denial.sourceEventID
+        event.sourceSubsequence = 0
+        event.evidence = "kernel_sandbox_denial"
+        if let duplicateCount = denial.reportedDuplicateCount {
+            event.evidence = "kernel_sandbox_denial;duplicate_report_summary_count=\(duplicateCount)"
+        }
+        if let endpoint = denial.networkEndpoint {
+            event.endpointFields = AccessLogEndpoint(host: endpoint.host, port: endpoint.port.map(UInt16.init),
+                                                    transport: endpoint.transport, socketPath: endpoint.socketPath)
+        }
+        // Unknown denials remain durable evidence even when no permission suggestion can be made.
+        let receipt = appendAccessRecord(event)
+        guard let access = denial.access else { return }
+        record(Observation(instance: instance, access: access, denied: true, at: receivedAt,
+                           networkTarget: denial.networkEndpoint?.rawValue, processName: denial.process, pid: denial.pid,
+                           eventID: receipt.result.eventID, accessLogSequence: receipt.result.sequence,
+                           accessLogWriterID: receipt.result.writerID, accessLogDisposition: receipt.disposition), instance: instance)
+    }
+
+    private func appendAccessRecord(_ record: AccessLogRecord) -> (result: AccessLogAppendResult, disposition: AccessLogDisposition) {
+        guard accessLogEnabled(record.profileID) else {
+            return (accessLog?.reserveReceipt() ?? AccessLogAppendResult(accepted: false), .memoryOnly)
+        }
+        guard let accessLog else { return (AccessLogAppendResult(accepted: false), .rejected) }
+        let result = accessLog.append(record)
+        return (result, result.accepted ? .queued : .rejected)
+    }
+
+    private func accessRecord(snapshot: InstanceSnapshot, operation: String, outcome: AccessLogOutcome,
+                              receivedAt: Date, source: AccessLogSource, target: String?,
+                              attribution: AccessLogAttributionStatus) -> AccessLogRecord {
+        AccessLogRecord(profileID: snapshot.profileID, operation: operation, outcome: outcome, receivedAt: receivedAt,
+                        profileRevision: snapshot.revision, runUUID: snapshot.runUUID, instanceID: snapshot.id,
+                        instanceOrigin: snapshot.instanceOrigin, bootID: snapshot.bootSessionID,
+                        rootProcess: snapshot.rootProcess.map {
+                            AccessLogProcessIdentity(pid: $0.pid, pidversion: snapshot.restored ? nil : $0.version,
+                                                     startTime: snapshot.rootStartTime)
+                        }, source: source, target: target, rawTarget: target,
+                        coverage: currentAccessLogCoverage(snapshot: snapshot), attributionStatus: attribution)
+    }
+
+    private func currentAccessLogCoverage(snapshot: InstanceSnapshot) -> AccessLogCoverage {
+        AccessLogCoverage(fileEventsSubscribed: fileEventsSubscribed, collectorHealthy: collectorHealth.isHealthy,
+                          attributionComplete: !snapshot.trackingIncomplete && !collectorHealth.coverage.attributionIncomplete,
+                          successfulNetworkCovered: false)
+    }
+
+    private func currentAccessLogCoverage(profileID: String?) -> AccessLogCoverage {
+        let ids = profileID.map { [$0] } ?? ((try? store.profileIDs()) ?? [])
+        let incomplete = ids.flatMap { tracker.instances(ofProfile: $0) }.contains { $0.isRunning && $0.trackingIncomplete }
+        return AccessLogCoverage(fileEventsSubscribed: fileEventsSubscribed, collectorHealthy: collectorHealth.isHealthy,
+                                 attributionComplete: !incomplete && !collectorHealth.coverage.attributionIncomplete,
+                                 successfulNetworkCovered: false)
+    }
+
+    private func esEvidence(_ kind: ESEventKind) -> String {
+        switch kind {
+        case let .open(_, write): return write ? "eslogger_notify_open_write" : "eslogger_notify_open_read"
+        case .openUnclassified: return "eslogger_notify_open_mode_unknown"
+        case let .close(_, modified): return modified ? "eslogger_notify_close_modified" : "eslogger_notify_close"
+        case .unsupported: return "eslogger_unsupported_event"
+        default: return "eslogger_notify"
+        }
     }
 
     private func record(_ observation: Observation, instance: Int) {
         guard let profileID = tracker.snapshot(of: instance)?.profileID else { return }
-        var list = observations[profileID, default: []]
-        list.append(observation)
-        if list.count > Self.observationLimit { list.removeFirst(list.count - Self.observationLimit) }
-        observations[profileID] = list
+        observations[profileID, default: []].append(observation)
+        let count = observations[profileID]!.count
+        if count > Self.observationLimit {
+            observations[profileID]!.removeFirst(count - Self.observationLimit)
+        }
     }
 
     /// Items still waiting for an answer: decided ones are listed in the activity log instead.
@@ -433,6 +767,101 @@ public final class HelperService {
                                       resolver: environment.resolver, caseInsensitive: environment.caseInsensitive)
         return engine.pendingItems(observations: observations[profile.id] ?? [], policy: try compiler.compile(profile, catalog: catalog),
                                    enabledTemplates: Set(profile.templates.map(\.id)))
+    }
+
+    /// Called only on the Helper's state queue. Authenticate and freeze inputs here; the returned
+    /// work reads only the thread-safe store and immutable values, never this service's state.
+    /// The platform bounds concurrent operations and executes them outside its control queue.
+    public func prepareAccessLogRequest(_ request: HelperRequest, caller: CallerIdentity,
+                                        process: ProcessKey) -> (@Sendable () async -> HelperResponse)? {
+        let profileID: String?
+        switch request {
+        case let .accessLogStatus(id): profileID = id
+        case let .queryAccessLog(query): profileID = query.profileID
+        case let .exportAccessLogPage(query, _): profileID = query.profileID
+        case let .clearAccessLog(id, _): profileID = id
+        default: return nil
+        }
+        var authenticated = caller
+        authenticated.managedInstance = tracker.owner(of: process)
+        if authenticated.managedInstance != nil { return { .failure(code: "managed_caller") } }
+        guard trust.role(of: authenticated) == .app else { return { .failure(code: "not_trusted") } }
+        do {
+            if let profileID {
+                guard ProfileID.isValid(profileID) else { return { .failure(code: "invalid_profile") } }
+                guard try store.latest(profileID) != nil else { return { .failure(code: "unknown_profile") } }
+            }
+            let coverage = currentAccessLogCoverage(profileID: profileID)
+            let loggingEnabled = profileID.map { accessLogEnabled($0) }
+            let enabledIDs = try store.profileIDs().filter { accessLogEnabled($0) }
+            switch request {
+            case .accessLogStatus:
+                let log = accessLog
+                let initializationError = accessLogInitializationError
+                return {
+                    var status: AccessLogStatus
+                    if let log { status = await log.status(profileID: profileID) }
+                    else {
+                        status = AccessLogStatus(profileID: profileID, writerID: "")
+                        status.errors = [initializationError ?? "access_log_unavailable"]
+                    }
+                    status.coverage = coverage
+                    status.loggingEnabled = loggingEnabled
+                    status.enabledProfileIDs = enabledIDs
+                    return .accessLogStatus(status)
+                }
+            case let .queryAccessLog(query):
+                guard let accessLog else { return { .failure(code: "access_log_unavailable") } }
+                return {
+                    do { return .accessLogPage(try await accessLog.query(query)) }
+                    catch { return .failure(code: Self.accessLogErrorCode(error)) }
+                }
+            case let .exportAccessLogPage(query, byteLimit):
+                guard let accessLog else { return { .failure(code: "access_log_unavailable") } }
+                return {
+                    do { return .accessLogExportPage(try await accessLog.exportPage(query, byteLimit: byteLimit)) }
+                    catch { return .failure(code: Self.accessLogErrorCode(error)) }
+                }
+            case let .clearAccessLog(profileID, expectedGeneration):
+                guard let accessLog else { return { .failure(code: "access_log_unavailable") } }
+                onAccessLogClearBoundary?()
+                let clearOperation = try accessLog.prepareClear(profileID: profileID, expectedGeneration: expectedGeneration)
+                return {
+                    do {
+                        let result = try await clearOperation.value()
+                        return .accessLogCleared(profileID: profileID, result: result)
+                    } catch { return .failure(code: Self.accessLogErrorCode(error)) }
+                }
+            default: return nil
+            }
+        } catch {
+            let code = Self.accessLogErrorCode(error)
+            return { .failure(code: code) }
+        }
+    }
+
+    /// Back on the state queue after the writer's barrier succeeds. Ingress after the cutoff
+    /// survives even if it arrived while this asynchronous operation was completing.
+    public func completeAccessLogClear(profileID: String, result: AccessLogClearResult) {
+        guard result.profileID == profileID else { return }
+        observations[profileID] = (observations[profileID] ?? []).filter {
+            guard $0.accessLogWriterID == result.writerID, let sequence = $0.accessLogSequence else { return false }
+            return sequence > result.cutoffSequence
+        }
+        log(profileID, .decision, "已清空访问日志", ["释放 \(result.removedBytes) 字节；清空后发生的访问继续记录。"])
+    }
+
+    private static func accessLogErrorCode(_ error: Error) -> String {
+        guard let error = error as? AccessLogError else { return "access_log_unavailable" }
+        switch error {
+        case .invalidProfileID: return "invalid_profile"
+        case .invalidCursor: return "access_log_cursor_invalid"
+        case .historyExpired: return "access_log_history_expired"
+        case .generationConflict: return "access_log_generation_conflict"
+        case .storageUnavailable: return "access_log_unavailable"
+        case .unsupportedVersion: return "access_log_unsupported_version"
+        case .queryBusy: return "access_log_busy"
+        }
     }
 
     public func handle(_ request: HelperRequest, caller: CallerIdentity, process: ProcessKey) -> HelperResponse {
@@ -520,6 +949,17 @@ public final class HelperService {
             case let .activity(profileID):
                 try require(role, in: [.app])
                 return .activity(try activityLog(profileID))
+            case .accessLogStatus, .queryAccessLog, .exportAccessLogPage, .clearAccessLog:
+                try require(role, in: [.app])
+                // Dispatch through prepareAccessLogRequest; never perform long disk work here.
+                return .failure(code: "access_log_async_required")
+            case let .setAccessLogEnabled(profileID, enabled):
+                try require(role, in: [.app])
+                guard try store.latest(profileID) != nil else { throw Failure(code: "unknown_profile") }
+                try accessLogSettings.setEnabled(enabled, profileID: profileID)
+                accessLogEnabledCache[profileID] = enabled
+                log(profileID, .decision, enabled ? "开启访问日志保存" : "关闭访问日志保存", ["程序权限和保护方式没有改变。"])
+                return .ok
             case let .uninstall(restoreOriginals, authorization):
                 try require(role, in: [.app])
                 return try uninstall(restoreOriginals: restoreOriginals, token: authorization)
@@ -606,9 +1046,15 @@ public final class HelperService {
         let sbpl = renderer.render(policy)
         let instance = nextInstance
         nextInstance += 1
-        tracker.register(instance: instance, profileID: profileID, revision: revision, root: process, supervisedByLaunchd: supervisedByLaunchd)
+        tracker.register(instance: instance, profileID: profileID, revision: revision, root: process,
+                         supervisedByLaunchd: supervisedByLaunchd, runUUID: makeRunID(), instanceOrigin: helperSessionID)
         verified.removeValue(forKey: instance)
         verificationIssues.removeValue(forKey: instance)
+        verificationPending.removeValue(forKey: instance)
+        verificationDeferred.removeValue(forKey: instance)
+        checkedPID.removeValue(forKey: instance)
+        checkedProcessStartTime.removeValue(forKey: instance)
+        checkedAt.removeValue(forKey: instance)
         registeredAt[instance] = clock()
         expectations[instance] = SandboxVerification.expectations(for: policy, environment: environment)
         log(profileID, .started, "运行副本 #\(instance) 已启动", ["使用修订 \(revision) 的权限", supervisedByLaunchd ? "由 AgentGuard 启动项启动" : "由 guard run 启动"])
@@ -645,6 +1091,11 @@ public final class HelperService {
         for instance in tracker.removeInstances(ofProfile: profileID) {
             verified.removeValue(forKey: instance)
             verificationIssues.removeValue(forKey: instance)
+            verificationPending.removeValue(forKey: instance)
+            verificationDeferred.removeValue(forKey: instance)
+            checkedPID.removeValue(forKey: instance)
+            checkedProcessStartTime.removeValue(forKey: instance)
+            checkedAt.removeValue(forKey: instance)
             registeredAt.removeValue(forKey: instance)
             expectations.removeValue(forKey: instance)
         }
@@ -765,10 +1216,21 @@ public final class HelperService {
                 detachedInstances: instances.filter(\.detachedFromLaunchd).map(\.id),
                 unmanagedProcesses: unmanaged[id]?.map(\.pid) ?? [],
                 verificationIssues: instances.filter(\.isRunning).flatMap { verificationIssues[$0.id] ?? [] },
-                untrackedInstances: instances.filter(\.trackingIncomplete).map(\.id)
+                untrackedInstances: instances.filter(\.trackingIncomplete).map(\.id),
+                verificationPending: instances.filter(\.isRunning).flatMap { verificationPending[$0.id] ?? [] },
+                verificationDeferred: Array(Set(instances.filter(\.isRunning).flatMap { verificationDeferred[$0.id] ?? [] })).sorted(),
+                runtimeRevisionState: RevisionState.evaluateKnownProcesses(savedRevision: latest.revision, instances: instances, verified: verified),
+                runtimeInstances: instances.filter(\.isRunning).map {
+                    RuntimeInstanceReport(id: $0.id, revision: $0.revision, entryPID: $0.entry?.pid,
+                                          knownPIDs: $0.liveProcesses.map(\.pid).sorted(),
+                                          checkedPID: checkedPID[$0.id], verified: verified[$0.id],
+                                          checkedProcessStartTime: checkedProcessStartTime[$0.id])
+                }
             )
         }
-        return StatusReport(profiles: profiles, collectorProblems: collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description))
+        return StatusReport(profiles: profiles,
+                            collectorProblems: collectorHealth.problems.sorted { $0.sortKey < $1.sortKey }.map(\.description),
+                            helperRuntimeCodeHash: helperRuntimeCodeHash, collectorInstallation: collectorInstallation)
     }
 
     static func code(_ error: ApprovalError) -> String {

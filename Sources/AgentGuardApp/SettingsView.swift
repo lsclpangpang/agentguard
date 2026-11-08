@@ -78,9 +78,11 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         component("AgentGuard App", AgentGuardVersion.current, ok: true)
                         component("后台服务（Helper）", model.helperReachable ? "已连接 · 协议 \(model.report?.helperProtocol ?? 0)" : "未连接",
-                                  ok: model.helperReachable && !model.helperOutdated)
-                        component("活动记录采集器", model.helperProblems.isEmpty ? "正常" : model.helperProblems.joined(separator: "；"),
-                                  ok: model.helperProblems.isEmpty)
+                                  ok: model.helperVersionStatus == .current)
+                        component("活动记录采集器", model.helperProblems.isEmpty ? "未报告运行异常" : model.helperProblems.joined(separator: "；"),
+                                  ok: model.helperReachable && model.helperProblems.isEmpty)
+                        component("采集器安装", model.report?.collectorInstallation?.description ?? "后台服务尚未报告安装状态",
+                                  ok: model.report?.collectorInstallation != nil && model.report?.collectorInstallation?.requiresMaintenance == false)
                         component("采集器位置", AgentGuardConfig.collectorPath, ok: true)
                     }
                     .padding(.top, 4)
@@ -95,12 +97,21 @@ struct SettingsView: View {
             return ("后台保护不可用", "连不上后台服务：权限无法保存，状态无法确认。已经运行的受管程序继续按原来的限制运行。点“检查并修复”。", .problem)
         }
         if model.helperOutdated {
-            return ("需要更新后台服务", "App 已更新，但后台服务还是旧版本，部分功能不可用。点“检查并修复”完成更新。", .attention)
+            return ("需要更新后台服务", "后台服务尚未确认使用当前 App 的版本，部分功能可能尚未启用。点“检查并修复”完成核对与更新。", .attention)
+        }
+        if model.helperVersionStatus == .identityUnavailable {
+            return ("后台组件版本待核对", "无法核对 App 内后台组件的签名。请重新安装完整的 AgentGuard 后再检查。", .attention)
+        }
+        if let notice = model.collectorInstallationNotice {
+            return ("采集器需要维护", notice, .attention)
         }
         if !model.helperProblems.isEmpty {
             return ("安装完整，活动记录有缺口", "保护正常执行，但活动记录采集器报告了问题，被阻止的访问可能没有全部列出。", .attention)
         }
-        return ("安装完整，后台保护可用", "App、后台服务和活动记录采集器都在正常工作，版本一致。", .allGood)
+        if model.report?.collectorInstallation == nil {
+            return ("采集器安装状态待确认", "后台服务尚未报告采集器的安装情况，暂不能确认随包修复是否已启用。", .attention)
+        }
+        return ("后台组件已连接", "后台服务与当前 App 匹配，采集器未报告运行异常。各程序的保护结果请查看其运行状态。", .allGood)
     }
 
     private func behavior(_ action: String, _ result: String) -> some View {

@@ -2,7 +2,6 @@
 import GuardCore
 import SwiftUI
 
-@main
 struct AgentGuardApp: App {
     @StateObject private var model = AppModel()
 
@@ -35,6 +34,23 @@ struct AgentGuardApp: App {
         case .attention: return "exclamationmark.shield"
         case .problem: return "xmark.shield"
         }
+    }
+}
+
+/// Maintenance runs from the installed, signature-pinned App. It uses the same Helper approval
+/// and system authentication as the window, without granting the CLI a new trusted role.
+@main
+enum AgentGuardEntry {
+    @MainActor
+    static func main() async {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == "--repair-process-control" {
+            exit(await ProcessControlRepairCommand.run(arguments: Array(arguments.dropFirst())))
+        }
+        if arguments.first == "--repair-go-build" {
+            exit(await ProcessControlRepairCommand.run(arguments: Array(arguments.dropFirst()), kind: .goBuild))
+        }
+        AgentGuardApp.main()
     }
 }
 

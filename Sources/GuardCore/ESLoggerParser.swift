@@ -1,10 +1,14 @@
 import Foundation
+import CoreFoundation
 
 public enum ESEventKind: Equatable, Sendable {
     case fork(child: ProcessKey)
     case exec(target: ProcessKey, path: String?)
     case exit
     case open(path: String, write: Bool)
+    /// An open notification without a trustworthy FREAD/FWRITE mode. Keep the event and target,
+    /// but never infer a content-read permission suggestion from the absence of a write bit.
+    case openUnclassified(path: String)
     case create(path: String)
     case rename(from: String, to: String)
     case unlink(path: String)
@@ -20,6 +24,48 @@ public struct ESLine: Equatable, Sendable {
     /// Identity baselines from the event itself, never sampled later by a potentially reused PID.
     public var processStartTime: UInt64? = nil
     public var relatedProcessStartTime: UInt64? = nil
+    /// Frozen at ingress by the collector adapter. A process start time is never a source event time.
+    public var receivedAt: Date? = nil
+    public var sourceAt: Date? = nil
+    public var sourceEventID: String? = nil
+    /// Kernel FREAD/FWRITE flags, not userspace O_RDONLY/O_WRONLY flags. Nil means not supplied
+    /// or not an integral UInt32. An open notification does not prove content was consumed.
+    public var openFlags: UInt32? = nil
+
+    public init(globalSequence: UInt64, process: ProcessKey, executablePath: String?, kind: ESEventKind,
+                processStartTime: UInt64? = nil, relatedProcessStartTime: UInt64? = nil,
+                receivedAt: Date? = nil, sourceAt: Date? = nil, sourceEventID: String? = nil,
+                openFlags: UInt32? = nil) {
+        self.globalSequence = globalSequence; self.process = process; self.executablePath = executablePath
+        self.kind = kind; self.processStartTime = processStartTime; self.relatedProcessStartTime = relatedProcessStartTime
+        self.receivedAt = receivedAt; self.sourceAt = sourceAt; self.sourceEventID = sourceEventID
+        self.openFlags = openFlags
+    }
+
+    /// Preserved before `observedAccesses` groups create/unlink/rename into writes.
+    public var rawOperation: String {
+        switch kind {
+        case .fork: return "fork"
+        case .exec: return "exec"
+        case .exit: return "exit"
+        case .open, .openUnclassified: return "open"
+        case .create: return "create"
+        case .rename: return "rename"
+        case .unlink: return "unlink"
+        case .close: return "close"
+        case let .unsupported(name): return name
+        }
+    }
+
+    /// Each rename target keeps the same source event identity and its own stable subsequence.
+    public var rawTargets: [String?] {
+        switch kind {
+        case let .exec(_, path): return [path]
+        case let .open(path, _), let .openUnclassified(path), let .create(path), let .unlink(path), let .close(path, _): return [path]
+        case let .rename(from, to): return [from, to]
+        case .fork, .exit, .unsupported: return [nil]
+        }
+    }
 
     public var processEvent: ProcessEvent? {
         switch kind {
@@ -37,7 +83,7 @@ public struct ESLine: Equatable, Sendable {
         case let .create(path), let .unlink(path): return [.write(path)]
         case let .rename(from, to): return [.write(from), .write(to)]
         case let .close(path, modified): return modified ? [.write(path)] : []
-        case .fork, .exit, .unsupported: return []
+        case .fork, .exit, .openUnclassified, .unsupported: return []
         }
     }
 
@@ -52,8 +98,9 @@ public enum ESParseError: Error, Equatable, Sendable {
 /// Parses one line of `eslogger --format json`. eslogger is not a stable API; this adapter is
 /// replaceable and its failures must surface as collector problems, never as silence.
 public enum ESLoggerParser {
-    /// Kernel open flag for write access (FWRITE).
-    static let writeFlag = 0x2
+    /// Kernel open flags (FREAD/FWRITE), distinct from the userspace O_* constants.
+    static let readFlag: UInt32 = 0x1
+    static let writeFlag: UInt32 = 0x2
 
     public static func parse(_ line: String) throws -> ESLine {
         guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)), let root = object as? [String: Any] else {
@@ -68,7 +115,9 @@ public enum ESLoggerParser {
         let body = event[name] as? [String: Any] ?? [:]
         let related = body[name == "fork" ? "child" : "target"] as? [String: Any]
         return ESLine(globalSequence: UInt64(sequence), process: key, executablePath: executablePath(process), kind: try kind(name, body),
-                      processStartTime: startTime(process), relatedProcessStartTime: related.flatMap(startTime))
+                      processStartTime: startTime(process), relatedProcessStartTime: related.flatMap(startTime),
+                      sourceAt: SourceEventTimestamp.parse(root["time"]),
+                      openFlags: name == "open" ? openFlags(body["fflag"]) : nil)
     }
 
     private static func startTime(_ process: [String: Any]) -> UInt64? {
@@ -82,8 +131,11 @@ public enum ESLoggerParser {
               let range = text.range(of: #"\.\d{6}(?=Z|[+-]\d{2}:\d{2}$)"#, options: .regularExpression),
               let micros = UInt64(text[range].dropFirst()) else { return nil }
         let secondsText = String(text[..<range.lowerBound]) + String(text[range.upperBound...])
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: secondsText), date.timeIntervalSince1970 > 0 else { return nil }
+        // Removing the six microsecond digits must leave whole seconds, never another fraction.
+        // Keep the uppercase separator and avoid a per-event formatter; microseconds stay integers.
+        guard secondsText.utf8.dropFirst(10).first == UInt8(ascii: "T"),
+              !secondsText.utf8.contains(UInt8(ascii: ".")),
+              let date = SourceEventTimestamp.parse(secondsText), date.timeIntervalSince1970 > 0 else { return nil }
         return UInt64(date.timeIntervalSince1970.rounded()) * 1_000_000 + micros
     }
 
@@ -98,8 +150,11 @@ public enum ESLoggerParser {
         case "exit":
             return .exit
         case "open":
-            let flags = integer(body["fflag"]) ?? 0
-            return .open(path: try filePath(body["file"], "open.file"), write: flags & writeFlag != 0)
+            let path = try filePath(body["file"], "open.file")
+            guard let flags = openFlags(body["fflag"]), flags & (readFlag | writeFlag) != 0 else {
+                return .openUnclassified(path: path)
+            }
+            return .open(path: path, write: flags & writeFlag != 0)
         case "create":
             return .create(path: try destination(body["destination"], "create.destination"))
         case "rename":
@@ -145,5 +200,12 @@ public enum ESLoggerParser {
         case let v as NSNumber: return v.intValue
         default: return nil
         }
+    }
+
+    private static func openFlags(_ value: Any?) -> UInt32? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let value = number.doubleValue
+        guard value.isFinite, value >= 0, value <= Double(UInt32.max), value.rounded(.towardZero) == value else { return nil }
+        return UInt32(value)
     }
 }

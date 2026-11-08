@@ -10,9 +10,13 @@ public struct InstanceRecord: Codable, Equatable, Sendable {
     public var startTime: UInt64
     public var supervisedByLaunchd: Bool
     public var bootSessionID: String?
+    /// Absent in records written before access-log persistence. Migration happens only after the
+    /// platform has validated the surviving root; decoding must not invent historical identity.
+    public var runUUID: String?
+    public var instanceOrigin: String?
 
     public init(instance: Int, profileID: String, revision: Int, pid: Int32, startTime: UInt64, supervisedByLaunchd: Bool,
-                bootSessionID: String? = nil) {
+                bootSessionID: String? = nil, runUUID: String? = nil, instanceOrigin: String? = nil) {
         self.instance = instance
         self.profileID = profileID
         self.revision = revision
@@ -20,6 +24,8 @@ public struct InstanceRecord: Codable, Equatable, Sendable {
         self.startTime = startTime
         self.supervisedByLaunchd = supervisedByLaunchd
         self.bootSessionID = bootSessionID
+        self.runUUID = runUUID
+        self.instanceOrigin = instanceOrigin
     }
 
     public func isFromEarlierBoot(current: String?) -> Bool {

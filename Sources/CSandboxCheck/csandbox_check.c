@@ -2,6 +2,8 @@
 
 #ifdef __APPLE__
 #include <stddef.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 
 // Private libsystem_sandbox SPI, declared as WebKit's SandboxSPI.h does. sandbox_check is variadic,
@@ -24,7 +26,15 @@ int agentguard_sandbox_is_sandboxed(int pid) {
 }
 
 int agentguard_sandbox_check_path(int pid, const char *operation, const char *path) {
-    return normalized(sandbox_check(pid, operation, (enum sandbox_filter_type)(SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT), path));
+    // The SPI resolves the path first. ENOENT can be returned as a denial (1), even when
+    // the profile allows the path. Neither an allow nor a deny is evidence for an absent
+    // object. Check both sides of the query to reject disappearance/replacement races too.
+    struct stat before, after;
+    if (stat(path, &before) != 0) return errno == ENOENT || errno == ENOTDIR ? -2 : -1;
+    int result = normalized(sandbox_check(pid, operation, (enum sandbox_filter_type)(SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT), path));
+    if (stat(path, &after) != 0) return errno == ENOENT || errno == ENOTDIR ? -2 : -1;
+    if (before.st_dev != after.st_dev || before.st_ino != after.st_ino) return -1;
+    return result;
 }
 
 int agentguard_sandbox_check_global_name(int pid, const char *operation, const char *name) {

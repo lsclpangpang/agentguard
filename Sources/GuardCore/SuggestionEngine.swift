@@ -7,6 +7,16 @@ public enum ObservedAccess: Hashable, Sendable, Codable {
     case connectLoopback(Int)
     case connectRemote
     case listen(Int)
+    case unixSocket(path: String, operation: String)
+    case signal(target: String)
+}
+
+/// Frozen at intake. A later logging toggle or a writer high-water mark cannot prove that a
+/// particular memory-only/rejected observation was saved.
+public enum AccessLogDisposition: String, Hashable, Codable, Sendable {
+    case queued
+    case memoryOnly = "memory_only"
+    case rejected
 }
 
 public struct Observation: Hashable, Sendable, Codable {
@@ -16,13 +26,34 @@ public struct Observation: Hashable, Sendable, Codable {
     public var denied: Bool
     public var count: Int
     public var at: Date?
+    /// The original target is independent of the permission category, which deliberately groups
+    /// remote connections. Optional fields preserve compatibility with older Helper reports.
+    public var networkTarget: String?
+    public var processName: String?
+    public var pid: Int32?
+    /// Identity shared with the persisted record; optional when logging is disabled or older Helpers
+    /// supplied the observation. Writer identity prevents sequence reuse across Helper restarts.
+    public var eventID: String?
+    public var accessLogSequence: UInt64?
+    public var accessLogWriterID: String?
+    public var accessLogDisposition: AccessLogDisposition?
 
-    public init(instance: Int?, access: ObservedAccess, denied: Bool, count: Int = 1, at: Date? = nil) {
+    public init(instance: Int?, access: ObservedAccess, denied: Bool, count: Int = 1, at: Date? = nil,
+                networkTarget: String? = nil, processName: String? = nil, pid: Int32? = nil,
+                eventID: String? = nil, accessLogSequence: UInt64? = nil, accessLogWriterID: String? = nil,
+                accessLogDisposition: AccessLogDisposition? = nil) {
         self.instance = instance
         self.access = access
         self.denied = denied
         self.count = count
         self.at = at
+        self.networkTarget = networkTarget
+        self.processName = processName
+        self.pid = pid
+        self.eventID = eventID
+        self.accessLogSequence = accessLogSequence
+        self.accessLogWriterID = accessLogWriterID
+        self.accessLogDisposition = accessLogDisposition
     }
 }
 
@@ -33,6 +64,8 @@ public enum Suggestion: Hashable, Sendable, Codable {
     case loopbackPort(Int)
     case outboundTCP
     case listen
+    case systemDNS
+    case processControl
 }
 
 public struct PendingItem: Hashable, Sendable, Codable {
@@ -150,7 +183,7 @@ public struct SuggestionEngine: Sendable {
         var files: [String: (path: CanonicalPath, write: Bool, tally: Tally)] = [:]
         var execs: [String: Tally] = [:]
         var ports: [Int: Tally] = [:]
-        var outbound = Tally(), listen = Tally()
+        var outbound = Tally(), listen = Tally(), systemDNS = Tally(), processControl = Tally()
 
         for observation in observations {
             switch observation.access {
@@ -181,11 +214,29 @@ public struct SuggestionEngine: Sendable {
                 }
                 execs[path.value, default: Tally()].add(observation)
             case let .connectLoopback(port):
-                if !policy.network.loopbackTCPConnect.contains(port) { ports[port, default: Tally()].add(observation) }
+                // UDP has no equivalent TCP grant. Keep it in recent accesses without proposing
+                // an unrelated TCP permission.
+                if observation.networkEndpoint?.transport == "UDP" { continue }
+                if !policy.network.loopbackTCPConnect.contains(port) {
+                    ports[port, default: Tally()].add(observation, sample: observation.networkTarget)
+                }
             case .connectRemote:
-                if policy.network.outboundTCP != .allowed { outbound.add(observation) }
+                if observation.networkEndpoint?.transport == "UDP" { continue }
+                if policy.network.outboundTCP != .allowed { outbound.add(observation, sample: observation.networkTarget) }
             case .listen:
-                if policy.network.listen != .allowed { listen.add(observation) }
+                if observation.networkEndpoint?.transport == "UDP" { continue }
+                if policy.network.listen != .allowed { listen.add(observation, sample: observation.networkTarget) }
+            case let .unixSocket(path, operation):
+                // Only this known service gets a scoped suggestion. Other sockets must never
+                // turn into a file grant or a general TCP/network grant.
+                if SystemDNS.matches(path: path, operation: operation), policy.network.systemDNS != .allowed {
+                    systemDNS.add(observation, sample: SystemDNS.socketPath)
+                }
+            case let .signal(target):
+                if observation.denied, ProcessControl.covers(denialTarget: target),
+                   !ProcessControl.isEnabled(in: policy.extraRules) {
+                    processControl.add(observation, sample: target)
+                }
             }
         }
 
@@ -197,9 +248,11 @@ public struct SuggestionEngine: Sendable {
         }
         items += aggregate(files, sensitive: sensitive)
         items += execs.map { $0.value.item(.exec($0.key), sensitive: sensitive.isSensitive($0.key), samples: [$0.key]) }
-        items += ports.map { $0.value.item(.loopbackPort($0.key), sensitive: false, samples: []) }
-        if outbound.count > 0 { items.append(outbound.item(.outboundTCP, sensitive: false, samples: [])) }
-        if listen.count > 0 { items.append(listen.item(.listen, sensitive: false, samples: [])) }
+        items += ports.map { $0.value.item(.loopbackPort($0.key), sensitive: false) }
+        if outbound.count > 0 { items.append(outbound.item(.outboundTCP, sensitive: false)) }
+        if listen.count > 0 { items.append(listen.item(.listen, sensitive: false)) }
+        if systemDNS.count > 0 { items.append(systemDNS.item(.systemDNS, sensitive: false)) }
+        if processControl.count > 0 { items.append(processControl.item(.processControl, sensitive: false)) }
         return items.sorted(by: Self.order)
     }
 
@@ -263,6 +316,8 @@ public struct SuggestionEngine: Sendable {
             return (3, String(repeating: "0", count: max(0, 5 - digits.count)) + digits)
         case .outboundTCP: return (4, "")
         case .listen: return (5, "")
+        case .systemDNS: return (6, "")
+        case .processControl: return (7, "")
         }
     }
 }

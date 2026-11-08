@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import GuardCore
 
@@ -48,15 +49,127 @@ import Testing
         #expect(try ESLoggerParser.parse(text).processStartTime == 1_700_000_000_123_456)
     }
 
-    @Test(arguments: ["2023-11-14T22:13:20.123Z", "garbage"])
+    @Test(arguments: [
+        ("2023-11-14T22:13:20.000001Z", UInt64(1_700_000_000_000_001)),
+        ("2023-11-14T22:13:20.999999Z", UInt64(1_700_000_000_999_999)),
+        ("2023-11-15T06:13:20.000001+08:00", UInt64(1_700_000_000_000_001)),
+        ("2023-11-14T17:13:20.999999-05:00", UInt64(1_700_000_000_999_999)),
+        ("2026-11-07T13:36:33.070013Z", UInt64(1_794_058_593_070_013))
+    ])
+    func birthRetainsIntegerMicroseconds(_ value: String, _ expected: UInt64) throws {
+        let text = #"{"global_seq_num":1,"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":"\#(value)"},"event":{"exit":{}}}"#
+        #expect(try ESLoggerParser.parse(text).processStartTime == expected)
+    }
+
+    @Test(arguments: ["2023-11-14T22:13:20.123Z", "2023-11-14T22:13:20.123456789Z", "garbage"])
     func roundedOrUnknownBirthDoesNotEstablishIdentity(_ value: String) throws {
         let text = #"{"global_seq_num":1,"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":"\#(value)"},"event":{"exit":{}}}"#
         #expect(try ESLoggerParser.parse(text).processStartTime == nil)
     }
 
+    @Test(arguments: [
+        "2023-02-29T22:13:20.123456Z",
+        "2100-02-29T00:00:00.123456Z",
+        "2023-11-31T22:13:20.123456Z",
+        "2023-11-14T24:13:20.123456Z",
+        "2023-11-14T22:13:20.123456+24:00",
+        "2023-11-14T22:13:20.123456+25:00",
+        "2023-11-14T22:13:20.123456+08:60",
+        "2023-11-14t22:13:20.123456Z",
+        "2023-11-14T22:13:20.123456Z ",
+        "2023-11-14T22:13:20.123456Zjunk",
+        "2023-11-14T22:13:20.999999.000001Z",
+        "2023-11-15T06:13:20.999999.000001+08:00",
+        "2023-11-14T22:13:20.123.456789Z"
+    ])
+    func noncanonicalBirthDoesNotNormalizeIntoAnIdentity(_ value: String) throws {
+        let text = #"{"global_seq_num":1,"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":"\#(value)"},"event":{"exit":{}}}"#
+        let parsed = try ESLoggerParser.parse(text)
+        #expect(parsed.processStartTime == nil)
+        #expect(parsed.kind == .exit)
+        #expect(parsed.process == ProcessKey(pid: 100, version: 4))
+    }
+
+    @Test(arguments: [
+        "2023-11-14T22:13:20.123456Z",
+        "2023-11-14T22:13:20.123456789Z",
+        "2023-11-15T06:13:20.123456+08:00",
+        "2023-11-14T17:13:20.123456-05:00"
+    ])
+    func sourceEventTimeComesFromRootTime(_ value: String) throws {
+        let text = #"{"global_seq_num":1,"time":"\#(value)","mach_time":999999,"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":{"tv_sec":1600000000,"tv_usec":654321}},"event":{"exit":{}}}"#
+        let parsed = try ESLoggerParser.parse(text)
+        let sourceAt = try #require(parsed.sourceAt)
+        #expect(abs(sourceAt.timeIntervalSince1970 - 1_700_000_000.123456789) < 0.000001)
+        #expect(parsed.processStartTime == 1_600_000_000_654_321)
+        #expect(parsed.receivedAt == nil)
+        #expect(parsed.kind == .exit)
+    }
+
+    @Test(arguments: [
+        "null", "0", "true", "{}", #""garbage""#,
+        #""2023-02-29T22:13:20.123456Z""#,
+        #""2023-11-14T24:13:20.123456Z""#,
+        #""2023-11-14T22:13:20.123456""#,
+        #""2023-11-14T22:13:20.123456+25:00""#,
+        #""2023-11-14T22:13:20.1234567890Z""#
+    ])
+    func invalidSourceEventTimeDoesNotRejectTheEvent(_ rawTime: String) throws {
+        let text = #"{"global_seq_num":1,"time":\#(rawTime),"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":{"tv_sec":1600000000,"tv_usec":654321}},"event":{"exit":{}}}"#
+        let parsed = try ESLoggerParser.parse(text)
+        #expect(parsed.sourceAt == nil)
+        #expect(parsed.processStartTime == 1_600_000_000_654_321)
+        #expect(parsed.kind == .exit)
+    }
+
+    @Test func missingSourceTimeDoesNotUseAnotherClock() throws {
+        let text = #"{"global_seq_num":1,"mach_time":999999,"deadline":9999999,"process":{"audit_token":{"pid":100,"pidversion":4},"start_time":{"tv_sec":1600000000,"tv_usec":654321}},"event":{"exit":{}}}"#
+        let parsed = try ESLoggerParser.parse(text)
+        #expect(parsed.sourceAt == nil)
+        #expect(parsed.processStartTime == 1_600_000_000_654_321)
+    }
+
+    @Test(arguments: [
+        ("2023-11-14T22:13:20.123456Z", "2023-11-14T22:13:20.123456Z"),
+        ("2023-11-14T22:13:20.123456789Z", "2023-11-14T22:13:20.123457Z")
+    ])
+    func sourceTimeSurvivesMicrosecondLogEncoding(_ input: String, _ output: String) throws {
+        let text = #"{"global_seq_num":1,"time":"\#(input)","process":{"audit_token":{"pid":100,"pidversion":4}},"event":{"exit":{}}}"#
+        let sourceAt = try #require(ESLoggerParser.parse(text).sourceAt)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = AccessLogTimestamp.encodingStrategy
+        let data = try encoder.encode(sourceAt)
+        #expect(String(decoding: data, as: UTF8.self) == "\"\(output)\"")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = AccessLogTimestamp.decodingStrategy
+        #expect(abs(try decoder.decode(Date.self, from: data).timeIntervalSince(sourceAt)) < 0.000001)
+    }
+
     @Test func openWithWriteFlagIsWrite() throws {
         #expect(try ESLoggerParser.parse(line(1, #"{"open":{"fflag":3,"file":{"path":"/a"}}}"#)).observedAccess == .write("/a"))
         #expect(try ESLoggerParser.parse(line(1, #"{"open":{"fflag":1,"file":{"path":"/a"}}}"#)).observedAccess == .read("/a"))
+    }
+
+    @Test(arguments: [
+        "", #""fflag":0,"#, #""fflag":32768,"#, #""fflag":true,"#,
+        #""fflag":-1,"#, #""fflag":1.5,"#, #""fflag":"1","#,
+        #""fflag":4294967296,"#,
+    ])
+    func unclassifiedOpenNeverSuggestsContentRead(_ flags: String) throws {
+        let parsed = try ESLoggerParser.parse(line(1, #"{"open":{\#(flags)"file":{"path":"/a"}}}"#))
+        #expect(parsed.rawOperation == "open")
+        #expect(parsed.rawTargets == ["/a"])
+        #expect(parsed.observedAccesses.isEmpty)
+        #expect(parsed.processEvent == nil)
+    }
+
+    @Test func rawOpenFlagsRetainReadWriteAndUnknownModes() throws {
+        for flags in [UInt32(0), 1, 2, 3, 32768, UInt32.max] {
+            let parsed = try ESLoggerParser.parse(line(1, #"{"open":{"fflag":\#(flags),"file":{"path":"/a"}}}"#))
+            #expect(parsed.openFlags == flags)
+        }
+        #expect(try ESLoggerParser.parse(line(1, #"{"open":{"file":{"path":"/a"}}}"#)).openFlags == nil)
+        #expect(try ESLoggerParser.parse(line(1, #"{"exit":{}}"#)).openFlags == nil)
     }
 
     @Test func createSupportsExistingFileAndNewPath() throws {

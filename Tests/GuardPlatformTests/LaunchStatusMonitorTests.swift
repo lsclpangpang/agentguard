@@ -4,7 +4,6 @@ import Testing
 @testable import GuardPlatform
 
 private final class StatusFetchFixture: @unchecked Sendable {
-    let started = DispatchSemaphore(value: 0)
     let proceed = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var batches: [[LaunchStatusRequest]] = []
@@ -16,11 +15,25 @@ private final class StatusFetchFixture: @unchecked Sendable {
 
     func fetch(_ requests: [LaunchStatusRequest]) -> [String: LaunchAgentStatus] {
         lock.lock(); batches.append(requests); lock.unlock()
-        started.signal()
         proceed.wait()
         return Dictionary(uniqueKeysWithValues: requests.map {
             ($0.id, LaunchAgentStatus(registered: true, running: true, runAtLogin: $0.launch?.runAtLogin ?? false, canRestoreOriginal: false))
         })
+    }
+}
+
+private final class StatusReadProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var readStarted = false
+    private var statuses: [LaunchAgentStatus]?
+
+    var started: Bool { lock.lock(); defer { lock.unlock() }; return readStarted }
+    var results: [LaunchAgentStatus]? { lock.lock(); defer { lock.unlock() }; return statuses }
+
+    func read(_ monitor: LaunchStatusMonitor) {
+        lock.lock(); readStarted = true; lock.unlock()
+        let values = (0..<200).map { _ in monitor.status(for: "demo") }
+        lock.lock(); statuses = values; lock.unlock()
     }
 }
 
@@ -34,31 +47,38 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
 }
 
 @Suite struct LaunchStatusMonitorTests {
-    @Test func repeatedStatusReadsFinishWhileSystemQueriesAreBlocked() {
-        let f = StatusFetchFixture(), readFinished = DispatchSemaphore(value: 0)
+    @Test func repeatedStatusReadsFinishWhileSystemQueriesAreBlocked() async {
+        let f = StatusFetchFixture(), reader = StatusReadProbe()
         let monitor = LaunchStatusMonitor(fetch: f.fetch)
         defer { f.proceed.signal() }
         monitor.refresh([.init(id: "demo", launch: nil)])
-        #expect(f.started.wait(timeout: .now() + 2) == .success)
-        DispatchQueue.global().async {
-            for _ in 0..<200 { _ = monitor.status(for: "demo") }
-            readFinished.signal()
+        #expect(await eventually { f.calls.count == 1 })
+        // A dedicated reader avoids measuring the global queue's scheduling delay. Async
+        // polling leaves the test executor free while the separate fetch worker stays blocked.
+        Thread.detachNewThread { reader.read(monitor) }
+        #expect(await eventually { reader.started })
+        let resultsWhileQueryBlocked = await eventually { reader.results != nil } ? reader.results : nil
+        let callsWhileQueryBlocked = f.calls
+        // Release before asserting so a lock regression can fail without leaving a blocked reader.
+        f.proceed.signal()
+        #expect(resultsWhileQueryBlocked?.count == 200)
+        if let resultsWhileQueryBlocked {
+            #expect(resultsWhileQueryBlocked.allSatisfy { $0.problem != nil })
         }
-        #expect(readFinished.wait(timeout: .now() + 1) == .success)
-        #expect(f.calls.count == 1)
-        #expect(monitor.status(for: "demo").problem != nil)
+        #expect(callsWhileQueryBlocked.count == 1)
+        #expect(await eventually { reader.results != nil })
     }
 
-    @Test func refreshesCoalesceAndOldResultsCannotRestoreADeletedProfile() async {
+    @Test func refreshesCoalesceAndOldResultsCannotRestoreADeletedProfile() async throws {
         let f = StatusFetchFixture(), old = [LaunchStatusRequest(id: "old", launch: nil)]
         let latest = [LaunchStatusRequest(id: "new", launch: nil)]
         let monitor = LaunchStatusMonitor(fetch: f.fetch)
         defer { f.proceed.signal(); f.proceed.signal() }
         monitor.refresh(old)
-        #expect(f.started.wait(timeout: .now() + 2) == .success)
+        try #require(await eventually { f.calls.count == 1 })
         for _ in 0..<100 { monitor.refresh(latest) }
         f.proceed.signal()
-        #expect(f.started.wait(timeout: .now() + 2) == .success)
+        try #require(await eventually { f.calls.count == 2 })
         // The old query completed, but its result must still be discarded while the new one waits.
         #expect(!monitor.status(for: "old").registered)
         #expect(monitor.status(for: "new").problem != nil)
@@ -68,15 +88,15 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
         #expect(f.calls == [old, latest])
     }
 
-    @Test func explicitInvalidationDiscardsAnOlderQueryForTheSameProfile() async {
+    @Test func explicitInvalidationDiscardsAnOlderQueryForTheSameProfile() async throws {
         let f = StatusFetchFixture(), requests = [LaunchStatusRequest(id: "demo", launch: nil)]
         let monitor = LaunchStatusMonitor(fetch: f.fetch)
         defer { f.proceed.signal(); f.proceed.signal() }
         monitor.refresh(requests)
-        #expect(f.started.wait(timeout: .now() + 2) == .success)
+        try #require(await eventually { f.calls.count == 1 })
         monitor.refresh(requests, invalidate: true)
         f.proceed.signal()
-        #expect(f.started.wait(timeout: .now() + 2) == .success)
+        try #require(await eventually { f.calls.count == 2 })
         #expect(!monitor.status(for: "demo").registered && monitor.status(for: "demo").problem != nil)
         f.proceed.signal()
         #expect(await eventually { monitor.status(for: "demo").problem == nil })

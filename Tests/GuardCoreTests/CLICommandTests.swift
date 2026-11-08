@@ -26,4 +26,24 @@ import Testing
         #expect(try CLICommand.parse(["list"]) == .list)
         #expect(try CLICommand.parse(["version"]) == .version)
     }
+
+    @Test func readDiagnosticsAcceptAnAbsolutePathAndOptionalJSON() throws {
+        let path = "/Library/Application Support/AgentGuard/owner.json"
+        #expect(try CLICommand.parse(["diagnose-read", "knodo", path])
+                == .diagnoseRead(profileID: "knodo", path: path, json: false))
+        #expect(try CLICommand.parse(["diagnose-read", "knodo", path, "--json"])
+                == .diagnoseRead(profileID: "knodo", path: path, json: true))
+    }
+
+    @Test(arguments: [
+        ["diagnose-read"], ["diagnose-read", "knodo"],
+        ["diagnose-read", "../knodo", "/tmp/test"],
+        ["diagnose-read", "knodo", "relative/path"],
+        ["diagnose-read", "knodo", "/tmp/test", "--allow"],
+        ["diagnose-read", "knodo", "/tmp/test", "--json", "--json"],
+        ["diagnose-read", "knodo", "/tmp/\u{0}test"],
+    ])
+    func rejectsAmbiguousReadDiagnostics(args: [String]) {
+        #expect(throws: CLIError.self) { try CLICommand.parse(args) }
+    }
 }

@@ -2,6 +2,66 @@ import Testing
 @testable import GuardCore
 
 @Suite struct InstanceTrackerTests {
+    @Test func observedRecoveryKeySuppliesMigrationAndSurvivesNextPlatformReconciliation() throws {
+        var t = InstanceTracker()
+        let born: UInt64 = 1_700_000_000_123_456
+        let placeholder = ProcessKey(pid: 20, version: UInt32(truncatingIfNeeded: born))
+        let observed = ProcessKey(pid: 20, version: 7)
+        t.register(instance: 4, profileID: "knodo", revision: 47, root: placeholder, restored: true,
+            runUUID: "same-run", instanceOrigin: "previous-helper", bootSessionID: "same-boot", rootStartTime: born)
+        var platformBirths = [placeholder: born]
+        _ = t.adoptDescendants(of: [], knownBirths: platformBirths, birth: { $0 == 20 ? born : nil })
+        t.handle(.gap)
+        let resolved = t.resolveObservedProcess(observed, startTime: born)
+        let result = try #require(resolved)
+        #expect(result.instance == 4 && result.previousKey == placeholder)
+        platformBirths.removeValue(forKey: try #require(result.previousKey))
+        platformBirths[observed] = born
+        _ = t.adoptDescendants(of: [], knownBirths: platformBirths, birth: { $0 == 20 ? born : nil })
+        let snapshot = try #require(t.snapshot(of: 4))
+        #expect(snapshot.liveProcesses == [observed] && snapshot.entry == observed)
+        #expect(snapshot.runUUID == "same-run" && snapshot.revision == 47 && snapshot.bootSessionID == "same-boot")
+        #expect(snapshot.trackingIncomplete && !snapshot.lifecycleConfirmed)
+        t.handle(.exit(observed))
+        let reused = t.resolveObservedProcess(.init(pid: 20, version: 8), startTime: born + 1)
+        #expect(reused == nil)
+        #expect(!t.isRunning(4))
+    }
+
+    @Test func adoptedChildBirthMigrationStaysWithinItsInstanceAndSurvivesReconciliation() throws {
+        var t = InstanceTracker()
+        let rootBorn: UInt64 = 1_700_000_000_123_456
+        let childBorn = rootBorn + 1_000
+        let placeholder = ProcessKey(pid: 20, version: UInt32(truncatingIfNeeded: rootBorn))
+        let parent = ProcessKey(pid: 20, version: 7)
+        let child = ProcessKey(pid: 21, version: 8)
+        t.register(instance: 4, profileID: "knodo", revision: 47, root: placeholder, restored: true,
+            runUUID: "same-run", bootSessionID: "same-boot", rootStartTime: rootBorn)
+        var platformBirths = [placeholder: rootBorn]
+        let birth: (Int32) -> UInt64? = { $0 == 20 ? rootBorn : $0 == 21 ? childBorn : nil }
+        let adopted = t.adoptDescendants(
+            of: [.init(key: child, executablePath: "/child", parentPID: 20, startTime: childBorn)],
+            knownBirths: platformBirths, birth: birth)
+        platformBirths.merge(adopted) { _, new in new }
+        let rootResolution = t.resolveObservedProcess(parent, startTime: rootBorn)
+        let rootMigration = try #require(rootResolution)
+        platformBirths.removeValue(forKey: try #require(rootMigration.previousKey))
+        platformBirths[parent] = rootBorn
+        let wrongInstance = t.resolveObservedProcess(child, startTime: childBorn, expectedInstance: 99)
+        #expect(wrongInstance == nil)
+        let childResolution = t.resolveObservedProcess(child, startTime: childBorn, expectedInstance: 4)
+        let childMigration = try #require(childResolution)
+        platformBirths.removeValue(forKey: try #require(childMigration.previousKey))
+        platformBirths[child] = childBorn
+        t.handle(.fork(parent: parent, child: child))
+        _ = t.adoptDescendants(of: [], knownBirths: platformBirths, birth: birth)
+        #expect(t.liveProcesses(of: 4) == [parent, child])
+        #expect(Set(platformBirths.keys) == [parent, child])
+        let stillWrongInstance = t.resolveObservedProcess(child, startTime: childBorn, expectedInstance: 99)
+        #expect(stillWrongInstance == nil)
+        #expect(t.snapshot(of: 4)?.runUUID == "same-run" && t.snapshot(of: 4)?.trackingIncomplete == true)
+    }
+
     let root = ProcessKey(pid: 100, version: 1)
     let a = ProcessKey(pid: 101, version: 1)
     let b = ProcessKey(pid: 102, version: 1)

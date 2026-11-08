@@ -169,6 +169,29 @@ extension AppModel {
             profile.network.outboundTCP = .allowed
         case .listen:
             profile.network.listen = .allowed
+        case .systemDNS:
+            profile.network.systemDNS = .allowed
+        case .processControl:
+            ProcessControl.enable(in: &profile)
+        }
+    }
+
+    func setProcessControl(_ allowed: Bool, in id: String) {
+        edit(id, warnings: allowed ? [] : ["只撤回这一项显式授权；其他迁移规则和系统基础规则仍保留。"]) { profile in
+            if allowed { ProcessControl.enable(in: &profile) }
+            else { ProcessControl.disable(in: &profile) }
+        }
+    }
+
+    func setSystemDNS(_ allowed: Bool, in id: String) {
+        guard var profile = profile(id) else { return }
+        profile.network.systemDNS = allowed ? .allowed : .denied
+        profile.revision += 1
+        let running = !(status(for: id)?.runningInstances.isEmpty ?? true)
+        Task {
+            guard case .applied = await submitAsync(profile) else { return }
+            lastNotice = running ? "系统域名解析权限已保存。重启 \(id) 后生效。"
+                                 : "系统域名解析权限已保存，下次启动 \(id) 时生效。"
         }
     }
 }

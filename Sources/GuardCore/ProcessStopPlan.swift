@@ -46,7 +46,7 @@ public struct StopOutcome: Codable, Equatable, Sendable {
     public var confirmed: [String] {
         let ended = (stopped + forced).sorted()
         guard !ended.isEmpty else { return ["没有需要停止的受管进程"] }
-        var lines = ["已停止 \(ended.count) 个受管进程（PID \(Self.list(ended))）"]
+        var lines = ["已停止本次跟踪到的 \(ended.count) 个进程（PID \(Self.list(ended))）"]
         if !forced.isEmpty { lines.append("其中 PID \(Self.list(forced)) 没有及时退出，已强制结束") }
         return lines
     }

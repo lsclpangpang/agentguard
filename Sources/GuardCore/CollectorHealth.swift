@@ -8,6 +8,8 @@ public enum CollectorSignal: Sendable {
     case authorizationDenied
     case unparseableOutput
     case storageLimitReached
+    case runtimeStatus(CollectorRuntimeStatus)
+    case inputGap(CollectorInputGap)
 }
 
 public enum CollectorProblem: Hashable, Sendable {
@@ -18,6 +20,9 @@ public enum CollectorProblem: Hashable, Sendable {
     case unauthorized
     case incompatibleOutput
     case storageFull
+    case inputOverflow(count: UInt64)
+    case inputLineTooLong(count: UInt64)
+    case attributionIncomplete
 }
 
 extension CollectorProblem: CustomStringConvertible {
@@ -30,6 +35,9 @@ extension CollectorProblem: CustomStringConvertible {
         case .unauthorized: return "未授权（需要完全磁盘访问）"
         case .incompatibleOutput: return "采集输出格式不兼容"
         case .storageFull: return "事件存储已达上限"
+        case let .inputOverflow(count): return "采集入口拥塞，累计未保留 \(count) 条记录"
+        case let .inputLineTooLong(count): return "采集输入超过单行上限，已丢弃 \(count) 行"
+        case .attributionIncomplete: return "采集曾遗漏进程身份信息，部分访问无法确认归属"
         }
     }
 
@@ -42,15 +50,20 @@ extension CollectorProblem: CustomStringConvertible {
         case .unauthorized: return 4
         case .incompatibleOutput: return 5
         case .storageFull: return 6
+        case .inputOverflow: return 7
+        case .inputLineTooLong: return 8
+        case .attributionIncomplete: return 9
         }
     }
 }
 
 public struct CollectorHealth: Equatable, Sendable {
     public var problems: Set<CollectorProblem>
+    public var coverage: CollectorCoverageStatus
 
-    public init(problems: Set<CollectorProblem>) {
+    public init(problems: Set<CollectorProblem>, coverage: CollectorCoverageStatus = CollectorCoverageStatus()) {
         self.problems = problems
+        self.coverage = coverage
     }
 
     public var isHealthy: Bool { problems.isEmpty }
@@ -68,6 +81,9 @@ public struct CollectorHealthMonitor: Sendable {
     private var exitedWhileRunning = false
     private var restartedAfterInterruption = false
     private var conditions: Set<CollectorProblem> = []
+    private var coverage = CollectorCoverageStatus()
+    private var sourceGeneration: String?
+    private var inputOverflowCount: UInt64 = 0
 
     public init(silenceTimeout: TimeInterval) {
         self.silenceTimeout = silenceTimeout
@@ -82,9 +98,18 @@ public struct CollectorHealthMonitor: Sendable {
             running = true
             lastSequence = nil
             lastActivity = time
+            coverage.connected = true
+            coverage.fileEventsSubscribed = nil
+            coverage.esloggerRunning = nil
+            coverage.sandboxRunning = nil
+            coverage.lastStatusAt = nil
         case .exited:
             running = false
             exitedWhileRunning = true
+            coverage.connected = false
+            coverage.fileEventsSubscribed = nil
+            coverage.esloggerRunning = nil
+            coverage.sandboxRunning = nil
         case .heartbeat:
             lastActivity = time
         case let .event(sequence):
@@ -93,7 +118,7 @@ public struct CollectorHealthMonitor: Sendable {
             conditions.remove(.unauthorized)
             if let last = lastSequence {
                 guard sequence > last else { return }
-                dropped += sequence - last - 1
+                dropped = adding(dropped, sequence - last - 1)
             }
             lastSequence = sequence
         case .authorizationDenied:
@@ -102,20 +127,50 @@ public struct CollectorHealthMonitor: Sendable {
             conditions.insert(.incompatibleOutput)
         case .storageLimitReached:
             conditions.insert(.storageFull)
+        case let .runtimeStatus(status):
+            guard status.protocolVersion == CollectorRuntimeStatus.currentProtocolVersion else {
+                conditions.insert(.incompatibleOutput)
+                coverage.fileEventsSubscribed = nil
+                return
+            }
+            // Before the first eslogger launch the daemon can report only its sandbox source.
+            // That empty generation is not a previous ES subscription and cannot prove a restart.
+            if !status.generation.isEmpty {
+                if let previous = sourceGeneration, previous != status.generation {
+                    lastSequence = nil
+                    restartedAfterInterruption = true
+                    coverage.attributionIncomplete = true
+                }
+                sourceGeneration = status.generation
+            }
+            running = status.esloggerRunning && status.sandboxRunning
+            lastActivity = time
+            coverage.fileEventsSubscribed = status.esloggerRunning ? status.fileEvents : nil
+            coverage.esloggerRunning = status.esloggerRunning
+            coverage.sandboxRunning = status.sandboxRunning
+            coverage.lastStatusAt = time
+        case let .inputGap(gap):
+            coverage.inputDroppedCount = adding(coverage.inputDroppedCount, gap.droppedCount)
+            coverage.attributionIncomplete = coverage.attributionIncomplete || gap.attributionIncomplete
+            inputOverflowCount = adding(inputOverflowCount, gap.countsByReason[.queueOverflow] ?? 0)
+            coverage.oversizedLineCount = adding(coverage.oversizedLineCount, gap.countsByReason[.oversizedLine] ?? 0)
         }
     }
 
     public func health(at now: Date) -> CollectorHealth {
-        guard hasStarted else { return CollectorHealth(problems: [.notStarted]) }
+        guard hasStarted else { return CollectorHealth(problems: [.notStarted], coverage: coverage) }
         var problems = conditions
         if dropped > 0 { problems.insert(.droppedEvents(count: dropped)) }
+        if inputOverflowCount > 0 { problems.insert(.inputOverflow(count: inputOverflowCount)) }
+        if coverage.oversizedLineCount > 0 { problems.insert(.inputLineTooLong(count: coverage.oversizedLineCount)) }
+        if coverage.attributionIncomplete { problems.insert(.attributionIncomplete) }
         if !running {
             problems.insert(.interrupted)
         } else if let last = lastActivity, now.timeIntervalSince(last) > silenceTimeout {
             problems.insert(.interrupted)
         }
         if restartedAfterInterruption { problems.insert(.restartedAfterInterruption) }
-        return CollectorHealth(problems: problems)
+        return CollectorHealth(problems: problems, coverage: coverage)
     }
 
     public mutating func acknowledgeDroppedEvents() { dropped = 0 }
@@ -126,5 +181,10 @@ public struct CollectorHealthMonitor: Sendable {
     public mutating func acknowledgeAll() {
         acknowledgeDroppedEvents()
         acknowledgeInterruption()
+    }
+
+    private func adding(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let (result, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : result
     }
 }

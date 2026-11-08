@@ -1,8 +1,11 @@
 /// One sandbox operation the Helper can ask the kernel about for another process.
-public enum SandboxOperation: String, Sendable {
+public enum SandboxOperation: String, Hashable, Sendable {
     case fileRead = "file-read-data"
+    case fileMetadata = "file-read-metadata"
     case fileWrite = "file-write-data"
     case machLookup = "mach-lookup"
+    /// Unix-domain sockets use the path filter, unlike IP endpoints.
+    case unixConnect = "network-outbound"
 }
 
 /// What one probe of a running process must find for its revision to count as in effect.
@@ -24,6 +27,8 @@ public struct SandboxExpectation: Equatable, Sendable {
 public enum SandboxCheckResult: Equatable, Sendable {
     case allowed
     case denied
+    /// Path lookup failed; the kernel's answer cannot establish either access or a boundary.
+    case missing
     /// The system could not answer, e.g. the process exited between two probes.
     case unavailable
 }
@@ -38,7 +43,12 @@ public protocol SandboxProbe: Sendable {
 
 public enum SandboxVerdict: Equatable, Sendable {
     case passed
+    /// All available checks passed. Only positive grants refer to paths not present yet.
+    /// This does not establish access to those paths; it does not defer any denial boundary.
+    case passedWithDeferred([String])
     case failed([String])
+    /// No mismatch was established, but some checks could not be completed.
+    case inconclusive([String])
     /// The process has not entered a sandbox (yet): the launcher applies it right after registering.
     case notSandboxed
     case unavailable
@@ -47,10 +57,8 @@ public enum SandboxVerdict: Equatable, Sendable {
 /// Checks a running instance against the revision it registered with. Passing means the kernel
 /// enforces the boundaries the user can see, not merely that the rules compiled.
 public enum SandboxVerification {
-    /// A name nothing grants: if it is reachable, deny-by-default is not in force.
+    /// Fallback only; an absent object yields an inconclusive check, never a confirmed denial.
     static let unlistedName = ".agentguard-unlisted-probe"
-    /// Probing a directory grant uses a child that need not exist; path filters match the string.
-    static let childName = ".agentguard-probe"
 
     public static func expectations(for policy: EffectivePolicy, environment: CompileEnvironment) -> [SandboxExpectation] {
         var result: [SandboxExpectation] = [
@@ -58,12 +66,19 @@ public enum SandboxVerification {
                                failure: "受管进程可以连接 AgentGuard Helper"),
         ]
         for path in environment.protectedPaths + environment.writeProtectedPaths {
-            result.append(SandboxExpectation(operation: .fileWrite, target: child(of: path), allowed: false,
+            result.append(SandboxExpectation(operation: .fileWrite, target: path, allowed: false,
                                              failure: "受保护的位置 \(path) 可以写入"))
         }
         // Unprotected observation runs with `(allow default)`; only the built-in denials hold.
         guard !policy.mode.liftsBoundary else { return result }
 
+        if let systemDNS = policy.network.systemDNS {
+            result.append(SandboxExpectation(operation: .unixConnect, target: SystemDNS.socketPath,
+                                             allowed: systemDNS == .allowed,
+                                             failure: systemDNS == .allowed
+                                                ? "已授权的系统域名解析服务不能连接"
+                                                : "已设为阻止的系统域名解析服务仍可连接"))
+        }
         if let unlisted = unlistedProbe(for: policy, environment: environment) {
             result.append(SandboxExpectation(operation: .fileRead, target: unlisted, allowed: false,
                                              failure: "未授权的位置 \(unlisted) 可以读取：默认拒绝没有生效，或有旧规则放开了它"))
@@ -71,7 +86,9 @@ public enum SandboxVerification {
                                              failure: "未授权的位置 \(unlisted) 可以写入：默认拒绝没有生效，或有旧规则放开了它"))
         }
         for grant in policy.files {
-            let target = grant.kind == .directory ? child(of: grant.path) : grant.path
+            // Probe the actual directory. A made-up child would be denied by path lookup
+            // even under a rule that allows every descendant.
+            let target = grant.path
             result.append(SandboxExpectation(operation: .fileRead, target: target, allowed: true,
                                              failure: "已授权的 \(grant.path) 不能读取"))
             switch grant.access {
@@ -84,7 +101,7 @@ public enum SandboxVerification {
             }
         }
         for grant in policy.patterns {
-            let target = grant.kind == .directory ? child(of: grant.sample) : grant.sample
+            let target = grant.sample
             result.append(SandboxExpectation(operation: .fileRead, target: target, allowed: true,
                                              failure: "通配授权 \(grant.pattern) 匹配的 \(grant.sample) 不能读取"))
             result.append(SandboxExpectation(operation: .fileWrite, target: target, allowed: grant.access == .readWrite,
@@ -99,24 +116,38 @@ public enum SandboxVerification {
         guard let sandboxed = probe.isSandboxed(pid: pid) else { return .unavailable }
         guard sandboxed else { return .notSandboxed }
         var failures: [String] = []
+        var pending: [String] = []
+        var deferred: [String] = []
         for expectation in expectations {
             switch probe.check(pid: pid, operation: expectation.operation, target: expectation.target) {
-            case .unavailable: return .unavailable
+            case .missing:
+                if expectation.allowed {
+                    deferred.append(expectation.target)
+                } else {
+                    pending.append("路径暂不存在，尚未核验限制：\(expectation.target)")
+                }
+            case .unavailable:
+                pending.append("系统暂时无法核验：\(expectation.target)")
             case .allowed where !expectation.allowed, .denied where expectation.allowed: failures.append(expectation.failure)
             case .allowed, .denied: break
             }
         }
-        return failures.isEmpty ? .passed : .failed(failures)
+        // A missing target must not conceal a confirmed mismatch elsewhere, nor turn an
+        // untestable denial into a successful boundary check.
+        if !failures.isEmpty { return .failed(failures) }
+        var seen: Set<String> = []
+        if !pending.isEmpty { return .inconclusive(pending.filter { seen.insert($0).inserted }) }
+        if !deferred.isEmpty { return .passedWithDeferred(deferred.filter { seen.insert($0).inserted }) }
+        return .passed
     }
 
-    /// The first candidate no grant covers; a pattern such as `~/.*` legitimately covers the first.
+    /// Prefer real system directories, outside the explicit grants, for the default-deny check.
     static func unlistedProbe(for policy: EffectivePolicy, environment: CompileEnvironment) -> String? {
         let identity = AliasResolver(aliases: [:])
         let files = policy.files.compactMap { g in (try? CanonicalPath(g.path, resolver: identity)).map { (g, $0) } }
         let patterns = policy.patterns.compactMap { g in (try? PathPattern(g.pattern, resolver: identity)).map { (g, $0) } }
-        let candidates = [environment.homeDirectory + "/" + unlistedName,
-                          environment.homeDirectory + "/agentguard-unlisted/probe",
-                          "/private/var/empty/" + unlistedName]
+        let candidates = ["/private/var/empty", "/private/var/root",
+                          environment.homeDirectory + "/" + unlistedName]
         return candidates.first { candidate in
             guard let path = try? CanonicalPath(candidate, resolver: identity) else { return false }
             let byFile = files.contains { grant, granted in
@@ -126,9 +157,5 @@ public enum SandboxVerification {
             let byPattern = patterns.contains { grant, pattern in pattern.covers(path, kind: grant.kind, caseInsensitive: environment.caseInsensitive) }
             return !byFile && !byPattern
         }
-    }
-
-    private static func child(of path: String) -> String {
-        (path.hasSuffix("/") ? path : path + "/") + childName
     }
 }

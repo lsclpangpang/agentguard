@@ -143,6 +143,29 @@ struct FakeVerifier: AuthorizationVerifier {
         #expect(s.handle(.applyTightening(profile: F.profile(files: [F.ro("/Users/me/docs")], revision: 2)), caller: F.appCaller, process: appProcess) == .failure(code: "authorization_required"))
     }
 
+    @Test func systemDNSNeedsApprovalAndCanBeRevokedInTheNextRevision() throws {
+        let s = service()
+        try create(s, F.profile(revision: 1))
+        let allowed = F.profile(network: NetworkPolicy(systemDNS: .allowed), revision: 2)
+        #expect(s.handle(.applyTightening(profile: allowed), caller: F.appCaller, process: appProcess)
+                == .failure(code: "authorization_required"))
+        try create(s, allowed)
+        #expect(try store.latest("knodo")?.network.systemDNS == .allowed)
+        guard case let .registered(_, permittedRules) = s.handle(.registerInstance(profileID: "knodo", revision: 2),
+                                                                caller: F.cliCaller, process: cliProcess) else {
+            Issue.record("expected permitted instance"); return
+        }
+        #expect(permittedRules.contains("(allow network-outbound (literal \"\(SystemDNS.socketPath)\"))"))
+        let denied = F.profile(network: NetworkPolicy(systemDNS: .denied), revision: 3)
+        #expect(s.handle(.applyTightening(profile: denied), caller: F.appCaller, process: appProcess) == .applied(revision: 3))
+        guard case let .registered(_, deniedRules) = s.handle(.registerInstance(profileID: "knodo", revision: 3),
+                                                             caller: F.cliCaller, process: ProcessKey(pid: 21, version: 1)) else {
+            Issue.record("expected restricted instance"); return
+        }
+        #expect(deniedRules.contains("(deny network-outbound (literal \"\(SystemDNS.socketPath)\"))"))
+        #expect(try store.latest("knodo")?.network.systemDNS == .denied)
+    }
+
     @Test func proposalMustTargetNextRevision() throws {
         let s = service()
         try create(s, F.profile(revision: 1))

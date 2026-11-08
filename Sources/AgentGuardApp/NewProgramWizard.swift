@@ -298,7 +298,7 @@ struct NewProgramWizard: View {
                 SwiftUI.Toggle(isOn: $recordMore) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("记录更多活动")
-                        Text("未允许的访问仍会被阻止。开启后额外记录成功的文件访问，帮助完善权限；随时可以关闭。").font(.caption).foregroundStyle(.secondary)
+                        Text("未允许的访问仍会被阻止。新版后台默认保存访问日志，可在“最近活动”中独立关闭；此项用于额外采集成功的文件访问，帮助完善权限。").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 DisclosureGroup("推荐权限组") {
@@ -333,7 +333,7 @@ struct NewProgramWizard: View {
                     if model.restartingProfiles.contains(name) {
                         HStack { ProgressView().controlSize(.small); Text("正在启动，等待确认保护…") }
                     } else {
-                        Label(summary.headline, systemImage: Theme.symbol(summary.level)).foregroundStyle(Theme.color(summary.level))
+                        Label(summary.headline, systemImage: Theme.symbol(summary.headlineLevel)).foregroundStyle(Theme.color(summary.headlineLevel))
                         Text(summary.impact).font(.callout).foregroundStyle(.secondary)
                         if status?.runningInstances.isEmpty ?? true { Button("启动 \(name)") { model.installLaunchAgent(name) }.buttonStyle(.borderedProminent) }
                     }
@@ -346,10 +346,14 @@ struct NewProgramWizard: View {
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
                     if !(status?.runningInstances.isEmpty ?? true) {
-                        Label(summary.headline, systemImage: Theme.symbol(summary.level)).foregroundStyle(Theme.color(summary.level))
+                        Label(summary.headline, systemImage: Theme.symbol(summary.headlineLevel)).foregroundStyle(Theme.color(summary.headlineLevel))
                     } else {
                         Text("等待在终端中运行…").font(.caption).foregroundStyle(.secondary)
                     }
+                }
+                if !(status?.untrackedInstances.isEmpty ?? true) {
+                    Label("部分子进程记录不完整，详情见程序概况。", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
                 }
             }
             if let saveError {

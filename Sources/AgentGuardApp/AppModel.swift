@@ -67,10 +67,15 @@ final class AppModel: ObservableObject {
     }
 
     let config: AgentGuardConfig
+    /// Candidate validated once for this App launch; never inferred from the connected Helper.
+    private let bundledHelperCodeHash: String?
 
     init() {
         let uid = getuid()
         config = AgentGuardConfig(home: UserAccount.home(uid: uid) ?? NSHomeDirectory(), uid: Int(uid), homebrewPrefix: AgentGuardConfig.detectHomebrewPrefix())
+        let directory = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).deletingLastPathComponent().path
+        bundledHelperCodeHash = try? CodeSigning.validatedCDHash(
+            atPath: directory + "/agentguard-helper", expectedIdentifier: AgentGuardConfig.helperServiceName)
     }
 
     var templates: [Template] { config.templates }
@@ -90,14 +95,31 @@ final class AppModel: ObservableObject {
         }
         let health = CollectorHealth(problems: report.collectorProblems.isEmpty ? [] : [.interrupted])
         let status = OverallStatus.evaluate(objects: objects, collector: health, freshness: freshness)
-        guard helperOutdated else { return status }
-        return OverallStatus(level: max(status.level, .attention), reasons: ["后台服务版本较旧，需要更新：在设置中点“检查并修复”"] + status.reasons)
+        var componentReasons: [String] = []
+        switch helperVersionStatus {
+        case .updateRequired: componentReasons.append("后台服务尚未确认使用当前 App 的版本：在设置中点“检查并修复”")
+        case .identityUnavailable: componentReasons.append("无法核对 App 内后台组件，请检查 App 是否安装完整")
+        case .current, nil: break
+        }
+        if let notice = collectorInstallationNotice { componentReasons.append(notice) }
+        guard !componentReasons.isEmpty else { return status }
+        return OverallStatus(level: max(status.level, .attention), reasons: componentReasons + status.reasons)
     }
 
-    /// The Helper answered but speaks an older protocol: the App was updated, the Helper was not.
+    var helperVersionStatus: ComponentVersionStatus? {
+        guard helperReachable, let report else { return nil }
+        return ComponentVersionStatus.helper(protocolVersion: report.helperProtocol, requiredProtocol: HelperProtocol.version,
+                                             runtimeCodeHash: report.helperRuntimeCodeHash, bundledCodeHash: bundledHelperCodeHash)
+    }
+
+    /// Protocol compatibility alone does not prove that the running Helper contains this App's fixes.
     var helperOutdated: Bool {
-        guard helperReachable, let report else { return false }
-        return report.helperProtocol < HelperProtocol.version
+        helperVersionStatus == .updateRequired
+    }
+
+    var collectorInstallationNotice: String? {
+        guard let installation = report?.collectorInstallation, installation.requiresMaintenance else { return nil }
+        return installation.description
     }
 
     var freshness: StatusFreshness { StatusFreshness.evaluate(confirmedAt: statusConfirmedAt, now: Date()) }
@@ -146,7 +168,7 @@ final class AppModel: ObservableObject {
             self.report = report
             helperReachable = true
             statusConfirmedAt = Date()
-            if report.helperProtocol >= HelperProtocol.version { installNotice = nil }
+            if helperVersionStatus == .current { installNotice = nil }
         } else {
             // Preserve the last report during a failed query so the selected detail is not rebuilt.
             helperReachable = false
@@ -172,6 +194,10 @@ final class AppModel: ObservableObject {
 
     func installHelper() {
         guard !uninstalling else { return }
+        guard bundledHelperCodeHash != nil else {
+            lastError = "无法核对 App 内后台组件的签名；请重新安装完整的 AgentGuard 后再修复"
+            return
+        }
         suspendHelperMaintenance()
         helperMaintenance.resume()
         UserDefaults.standard.set(false, forKey: "helperRemovedByUser")
@@ -200,7 +226,8 @@ final class AppModel: ObservableObject {
     /// ad-hoc re-signed build leaves a job that launchd can never spawn. Registering again once per
     /// launch is what makes a rebuilt app work without a trip to System Settings.
     private func repairStaleRegistrationIfNeeded() {
-        guard helperMaintenance.enabled, !didAttemptRegistrationRepair, registrationRepairTask == nil else { return }
+        guard helperMaintenance.enabled, bundledHelperCodeHash != nil,
+              !didAttemptRegistrationRepair, registrationRepairTask == nil else { return }
         let service = SMAppService.daemon(plistName: AgentGuardConfig.helperPlistName)
         guard HelperInstallRepair.action(status: Self.installStatus(service.status), reachable: helperReachable) != .none else {
             return
@@ -282,12 +309,20 @@ final class AppModel: ObservableObject {
                 guard !Task.isCancelled, helperMaintenance.enabled else { return }
                 _ = await refreshReport(timeout: 2, includePending: false)
                 guard !Task.isCancelled, helperMaintenance.enabled else { return }
-                if helperReachable && !helperOutdated { startAutoRefresh(); return }
+                if helperVersionStatus == .current { startAutoRefresh(); return }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
             guard !Task.isCancelled, helperMaintenance.enabled else { return }
-            installNotice = helperOutdated ? "后台服务仍是旧版本，更新尚未确认。请检查后台项目的系统授权后重试。"
-                                          : "尚未连接到后台服务，请检查后台项目的系统授权。"
+            switch helperVersionStatus {
+            case .updateRequired:
+                installNotice = "后台服务仍未确认使用当前 App 的版本。请检查后台项目的系统授权后重试。"
+            case .identityUnavailable:
+                installNotice = "无法核对 App 内后台组件的签名，请检查 App 是否安装完整。"
+            case .current:
+                installNotice = nil
+            case nil:
+                installNotice = "尚未连接到后台服务，请检查后台项目的系统授权。"
+            }
             startAutoRefresh()
         }
     }
@@ -519,6 +554,10 @@ final class AppModel: ObservableObject {
                 profile.network.outboundTCP = .allowed
             case .listen:
                 profile.network.listen = .allowed
+            case .systemDNS:
+                profile.network.systemDNS = .allowed
+            case .processControl:
+                ProcessControl.enable(in: &profile)
             }
         }
     }
@@ -560,7 +599,10 @@ final class AppModel: ObservableObject {
             var lines = ["按已保存的权限启动：" + LaunchArguments.format([launch.executable] + launch.arguments),
                          runAtLogin(id) ?? launch.runAtLogin ? "启用登录自启，后续登录也通过 AgentGuard 启动" : "仅在本次登录中启动，不添加登录自启"]
             if !(status(for: id)?.runningInstances.isEmpty ?? true) {
-                lines.insert("结束 \(id) 当前运行的副本，正在进行的任务会被中断；重启后旧权限才会收回", at: 0)
+                lines.insert("结束 \(id) 当前已跟踪的进程，正在进行的任务会被中断；新副本将加载已保存的权限", at: 0)
+            }
+            if !(status(for: id)?.untrackedInstances.isEmpty ?? true) {
+                lines.append("历史子进程跟踪记录不完整；本次重启不能确认遗漏的旧子进程已经退出")
             }
             if let original = launch.originalLabel, status(for: id)?.launchAgent?.canRestoreOriginal != true {
                 lines.append("备份并替换原自启任务：\(original)")
@@ -577,8 +619,18 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 let remaining = deadline.timeIntervalSinceNow
                 guard remaining > 0, let snapshot = await refreshReport(timeout: remaining) else { break }
-                if snapshot.profiles.first(where: { $0.profileID == id })?.revisionState == .applied(running: true) {
-                    lastNotice = [lastNotice, restart ? "\(id) 已重启，当前修订已加载，已确认旧运行副本退出。可以重新尝试之前失败的操作。" : "\(id) 已启动，当前修订已加载。"]
+                let current = snapshot.profiles.first(where: { $0.profileID == id })
+                if let current, (current.runtimeRevisionState ?? current.revisionState) == .applied(running: true) {
+                    let result = current.revisionState.isComplete
+                        ? "当前副本的权限检查已通过。可以重新尝试之前失败的操作。"
+                        : "当前副本的权限检查已通过；历史跟踪缺口仍保留，详情见下方。"
+                    lastNotice = [lastNotice, "\(id) 已\(restart ? "重启" : "启动")，" + result]
+                        .compactMap { $0 }.joined(separator: "\n")
+                    break
+                }
+                if let current, !current.runningInstances.isEmpty,
+                   (current.runtimeRevisionState ?? current.revisionState) == .verificationFailed || !current.verificationPending.isEmpty {
+                    lastNotice = [lastNotice, "\(id) 已\(restart ? "重启" : "启动")，权限核验结果见下方。"]
                         .compactMap { $0 }.joined(separator: "\n")
                     break
                 }
